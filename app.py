@@ -27,10 +27,7 @@ COLUMNS = [
     "Vehicle Type",
     "Case",
     "Jar",
-    "Freight Charges",
 ]
-
-FREIGHT_MATRIX_CSV = "FRIEGHT M1  M2 Trip matrix Master File NEW.xlsx - HIKE M2 KM TRIP MATRIX.csv"
 
 MIME_TYPES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "pdf": "application/pdf"}
 
@@ -225,81 +222,19 @@ def analyze_bills(uploaded_files):
     return []
 
 
-def load_freight_matrix(path: str) -> Optional[pd.DataFrame]:
-    if not os.path.exists(path):
-        return None
-    try:
-        df = pd.read_csv(path)
-        return df
-    except Exception:
-        try:
-            return pd.read_excel(path)
-        except Exception:
-            return None
 
-
-def find_customer_column(df: pd.DataFrame) -> str:
-    candidates = [c for c in df.columns if re.search(r"customer|distributor|name", c, re.I)]
-    return candidates[0] if candidates else df.columns[0]
-
-
-def find_depot_column(df: pd.DataFrame, from_value: str) -> Optional[str]:
-    # find column whose name appears in from_value
-    if not isinstance(from_value, str):
-        return None
-    from_low = from_value.lower()
-    depot_cols = [c for c in df.columns if c not in [find_customer_column(df)]]
-    # prefer exact substring match
-    for c in depot_cols:
-        if c.lower() in from_low:
-            return c
-    # fallback: try tokens
-    for token in ["thane", "mumbai", "vasai", "palghar"]:
-        for c in depot_cols:
-            if token in c.lower() and token in from_low:
-                return c
-    return None
-
-
-def lookup_freight_for_row(master_df: pd.DataFrame, customer: str, from_loc: str) -> Optional[float]:
-    if master_df is None or master_df.empty:
-        return None
-    cust_col = find_customer_column(master_df)
-    # case-insensitive match exact or contains
-    mask = master_df[cust_col].astype(str).str.strip().str.lower() == str(customer).strip().lower()
-    if not mask.any():
-        mask = master_df[cust_col].astype(str).str.lower().str.contains(str(customer).strip().lower(), na=False)
-    if not mask.any():
-        return None
-    row = master_df[mask].iloc[0]
-    depot_col = find_depot_column(master_df, from_loc)
-    if depot_col is None:
-        return None
-    val = row.get(depot_col)
-    if pd.isna(val) or val == "":
-        return None
-    try:
-        return float(val)
-    except Exception:
-        return None
 
 
 st.set_page_config(page_title="Project Kill Bill", layout="wide")
 
-st.title("Project Kill Bill — Freight-aware Invoice Aggregator")
+st.title("Project Kill Bill — Invoice Aggregator")
 
-st.markdown("Upload bills (images or PDFs), process, and download an Excel report with Freight Charges.")
+st.markdown("Upload bills (images or PDFs), process, and download an Excel report.")
 
 uploaded_files = st.file_uploader("Upload one or more bill images or PDFs", type=["png", "jpg", "jpeg", "pdf"], accept_multiple_files=True)
 
-master_df = load_freight_matrix(FREIGHT_MATRIX_CSV)
-if master_df is None:
-    st.warning(f"Freight matrix file not found: {FREIGHT_MATRIX_CSV}. Freight lookups will be blank.")
-else:
-    st.success(f"Loaded freight matrix with {len(master_df)} rows from {FREIGHT_MATRIX_CSV}")
-
 if st.button("Process Bills", disabled=(not uploaded_files)):
-    with st.spinner("Processing bills and computing freight..."):
+    with st.spinner("Processing bills..."):
         try:
             records = analyze_bills(uploaded_files)
             if not records:
@@ -370,15 +305,6 @@ if st.button("Process Bills", disabled=(not uploaded_files)):
 
             agg = pd.DataFrame(agg_rows)
 
-            # lookup freight per aggregated row
-            freight_vals = []
-            for _, r in agg.iterrows():
-                cust = r.get("Customer Name", "")
-                from_loc = r.get("From", "")
-                val = lookup_freight_for_row(master_df, cust, from_loc) if master_df is not None else None
-                freight_vals.append(val)
-            agg["Freight Charges"] = freight_vals
-
             # ensure Sr No.
             if "Sr No." not in agg.columns:
                 agg.insert(0, "Sr No.", range(1, len(agg) + 1))
@@ -387,13 +313,8 @@ if st.button("Process Bills", disabled=(not uploaded_files)):
             final_cols = [c for c in COLUMNS if c in agg.columns]
             result_df = agg[final_cols].copy()
 
-            # show styled dataframe highlighting blank freight
-            def highlight_freight_missing(row):
-                return ["background-color: #fff3b0" if (pd.isna(row.get("Freight Charges")) or row.get("Freight Charges") == "") else "" for _ in row]
-
             st.markdown("**Review & Edit Extracted Data**")
-            styled = result_df.style.apply(highlight_freight_missing, axis=1)
-            st.dataframe(styled, use_container_width=True)
+            st.dataframe(result_df, use_container_width=True)
 
             # editable grid (keeps same data)
             edited = st.data_editor(result_df, num_rows="dynamic", use_container_width=True, hide_index=True)
@@ -411,7 +332,7 @@ if st.button("Process Bills", disabled=(not uploaded_files)):
 
             st.download_button(label="Download Excel (.xlsx)", data=to_xlsx_bytes(edited), mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", file_name="Bisleri Report.xlsx")
 
-            st.success("Processing complete. Blank Freight Charges rows are highlighted for manual entry.")
+            st.success("Processing complete.")
 
         except json.JSONDecodeError:
             st.error("Gemini returned invalid JSON. Please try processing again.")

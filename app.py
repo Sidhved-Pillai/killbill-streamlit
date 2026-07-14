@@ -3,261 +3,21 @@ import json
 import os
 import re
 import time
+from typing import List, Dict, Any, Optional
 
 import pandas as pd
-import pypdf
 import streamlit as st
-from google import genai
-from google.genai import types
 from PIL import Image
 
-API_KEY = (
-    os.getenv("GOOGLE_API_KEY")
-    or os.getenv("GENAI_API_KEY")
-    or st.secrets.get("GOOGLE_API_KEY", "")
-)
-MODEL_FALLBACKS = [
-    "gemini-flash-lite-latest",
-    "gemini-flash-latest",
-    "gemini-3.1-flash-lite",
-    "gemini-2.0-flash-lite",
-    "gemini-2.0-flash-lite-001",
-]
-MAX_RETRIES = 5
-INITIAL_BACKOFF_SECONDS = 4
+try:
+    from google import genai
+    from google.genai import types
+except Exception:
+    genai = None
 
-PREMIUM_CSS = """
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-
-    html, body, [data-testid="stAppViewContainer"] {
-        background-color: #F8F9FA;
-        color: #111111;
-        font-family: 'Inter', 'Helvetica Neue', sans-serif;
-    }
-
-    .main .block-container {
-        max-width: 1180px;
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-    }
-
-    .premium-title-wrap {
-        margin-bottom: 1.2rem;
-    }
-
-    .title-kicker {
-        font-size: 0.78rem;
-        font-weight: 700;
-        letter-spacing: 0.18em;
-        color: #D32F2F;
-        text-transform: uppercase;
-        margin-bottom: 0.35rem;
-    }
-
-    .premium-title {
-        margin: 0;
-        font-size: 3rem;
-        line-height: 1.05;
-        font-weight: 800;
-        color: #111111;
-        letter-spacing: -0.03em;
-    }
-
-    .premium-title span {
-        color: #D32F2F;
-    }
-
-    .onboarding-grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 1rem;
-        margin: 1.4rem 0 1.8rem;
-    }
-
-    .onboarding-card {
-        background: #FFFFFF;
-        border: 1px solid rgba(17, 17, 17, 0.08);
-        border-radius: 18px;
-        padding: 1rem 1.05rem;
-        box-shadow: 0 10px 28px rgba(17, 17, 17, 0.08);
-    }
-
-    .onboarding-step {
-        display: inline-block;
-        margin-bottom: 0.65rem;
-        padding: 0.28rem 0.55rem;
-        border-radius: 999px;
-        background: rgba(211, 47, 47, 0.1);
-        color: #D32F2F;
-        font-size: 0.82rem;
-        font-weight: 700;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
-    }
-
-    .onboarding-card h4 {
-        margin: 0 0 0.4rem 0;
-        color: #111111;
-        font-size: 1.05rem;
-        font-weight: 700;
-    }
-
-    .onboarding-card p {
-        margin: 0;
-        color: #111111;
-        font-size: 0.95rem;
-        line-height: 1.55;
-    }
-
-    [data-testid="stFileUploader"] section {
-        background: #FFFFFF;
-        border: 1px solid rgba(17, 17, 17, 0.12);
-        border-radius: 16px;
-        box-shadow: 0 8px 24px rgba(17, 17, 17, 0.08);
-        transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
-    }
-
-    [data-testid="stFileUploader"] section:hover {
-        border-color: #D32F2F;
-        box-shadow: 0 12px 30px rgba(211, 47, 47, 0.14);
-        transform: translateY(-1px);
-    }
-
-    [data-testid="stFileUploader"] button,
-    [data-testid="stBaseButton-secondary"] button,
-    div[data-testid="stButton"] > button,
-    button[kind="primary"] {
-        background: #D32F2F !important;
-        color: #FFFFFF !important;
-        border: 1px solid #D32F2F !important;
-        border-radius: 12px;
-        font-weight: 700;
-        letter-spacing: 0.01em;
-        padding: 0.75rem 1.15rem;
-        box-shadow: 0 10px 24px rgba(211, 47, 47, 0.18);
-        transition: all 180ms ease;
-    }
-
-    [data-testid="stFileUploader"] button:hover,
-    [data-testid="stBaseButton-secondary"] button:hover,
-    div[data-testid="stButton"] > button:hover,
-    button[kind="primary"]:hover {
-        background: #B71C1C !important;
-        border-color: #B71C1C !important;
-        box-shadow: 0 14px 30px rgba(183, 28, 28, 0.3);
-        transform: translateY(-1px);
-    }
-
-    [data-testid="stFileUploader"] div[data-testid="stFileUploaderFileLink"] {
-        color: #111111 !important;
-        background: #FFFFFF !important;
-        border: 1px solid rgba(17, 17, 17, 0.12);
-        border-radius: 10px;
-        padding: 0.25rem 0.5rem;
-    }
-
-    [data-testid="stFileUploader"] div[data-testid="stFileUploaderFileLink"] span,
-    [data-testid="stFileUploader"] div[data-testid="stFileUploaderFileLink"] p,
-    [data-testid="stFileUploader"] div[data-testid="stFileUploaderFileLink"] * {
-        color: #111111 !important;
-    }
-
-    [data-testid="stFileUploader"] [data-testid="stWidgetLabel"],
-    [data-testid="stFileUploader"] .st-emotion-cache-1h9usn1,
-    [data-testid="stFileUploader"] .st-emotion-cache-17rjhe1,
-    [data-testid="stFileUploader"] .st-emotion-cache-1xsdgfe,
-    [data-testid="stFileUploader"] .st-emotion-cache-1v0mbdj,
-    [data-testid="stFileUploader"] .st-emotion-cache-1ya1qef,
-    [data-testid="stFileUploader"] p,
-    [data-testid="stFileUploader"] span,
-    [data-testid="stFileUploader"] div {
-        color: #111111 !important;
-    }
-
-    [data-testid="stDataFrame"],
-    [data-testid="stDataEditor"] {
-        border: 1px solid rgba(17, 17, 17, 0.10);
-        border-radius: 16px;
-        overflow: hidden;
-        box-shadow: 0 10px 28px rgba(17, 17, 17, 0.08);
-        background: #FFFFFF;
-    }
-
-    [data-testid="stDataFrame"] > div,
-    [data-testid="stDataEditor"] > div {
-        border-radius: 16px;
-    }
-
-    [data-testid="stDataFrame"] table,
-    [data-testid="stDataEditor"] table,
-    [data-testid="stDataFrame"] th,
-    [data-testid="stDataEditor"] th,
-    [data-testid="stDataFrame"] td,
-    [data-testid="stDataEditor"] td {
-        background: #f7f8fa !important;
-        color: #111111 !important;
-        border-color: rgba(17, 17, 17, 0.08) !important;
-    }
-
-    [data-testid="stDataFrame"] th,
-    [data-testid="stDataEditor"] th {
-        background: #e8eaed !important;
-        color: #111111 !important;
-    }
-
-    [data-testid="stDataFrame"] tr:nth-child(odd) td,
-    [data-testid="stDataEditor"] tr:nth-child(odd) td {
-        background: #f7f8fa !important;
-    }
-
-    [data-testid="stDataFrame"] tr:nth-child(even) td,
-    [data-testid="stDataEditor"] tr:nth-child(even) td {
-        background: #ffffff !important;
-    }
-
-    div[data-testid="stDownloadButton"] > button,
-    [data-testid="stDownloadButton"] button {
-        background: #D32F2F !important;
-        color: #FFFFFF !important;
-        border: 1px solid #D32F2F !important;
-    }
-
-    .section-label {
-        margin: 0.9rem 0 0.5rem;
-        color: #111111;
-        font-size: 1.08rem;
-        font-weight: 700;
-        letter-spacing: 0.01em;
-    }
-
-    .upload-status {
-        margin: 0 0 1.35rem 0;
-        padding: 0.85rem 1rem;
-        background: #1B5E20;
-        border: 1px solid #2E7D32;
-        border-left: 4px solid #2E7D32;
-        border-radius: 12px;
-        color: #FFFFFF;
-        font-weight: 700;
-        box-shadow: 0 8px 22px rgba(17, 17, 17, 0.08);
-    }
-
-    div[data-testid="stNotification"] {
-        background: #1B5E20;
-        border: 1px solid #2E7D32;
-        border-left: 4px solid #2E7D32;
-        border-radius: 12px;
-        box-shadow: 0 8px 22px rgba(17, 17, 17, 0.08);
-    }
-
-    div[data-testid="stNotification"] * {
-        color: #FFFFFF !important;
-    }
-</style>
-"""
-
+# Configuration
 COLUMNS = [
+    "Sr No.",
     "Date",
     "Invoice No.",
     "Vehicle No.",
@@ -267,54 +27,35 @@ COLUMNS = [
     "Vehicle Type",
     "Case",
     "Jar",
+    "Freight Charges",
 ]
 
-MIME_TYPES = {
-    "png": "image/png",
-    "jpg": "image/jpeg",
-    "jpeg": "image/jpeg",
-    "pdf": "application/pdf",
-}
+FREIGHT_MATRIX_CSV = "FRIEGHT M1  M2 Trip matrix Master File NEW.xlsx - HIKE M2 KM TRIP MATRIX.csv"
 
-SYSTEM_INSTRUCTION = """
-You are auditing a combined batch of logistics delivery sheets for Ubiquity Transtech.
-Scan all attached documents together and extract every single distinct trip row you find across all files.
+MIME_TYPES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "pdf": "application/pdf"}
 
-Return ONLY a single valid JSON list of objects. Each object represents one invoice trip row and must contain exactly these keys:
-- "Date" (format: DD-MMM-YY, e.g. 25-May-26)
-- "Invoice No."
-- "Vehicle No."
-- "From"
-- "Customer Name"
-- "To"
-- "Vehicle Type"
-- "Case"
-- "Jar"
 
-Rules:
-- Treat all attached documents as one consolidated batch and aggregate the final result across the whole upload.
-- If an item mentions "LTR" or "20 LTR", put its quantity into "Jar" and leave "Case" empty for that item.
-- If an item mentions "ML", put its quantity into "Case" and leave "Jar" empty for that item.
-- If a record contains both LTR and ML items, include both quantities in the same object with Case and Jar separated accordingly.
-- Vehicle Type should default to "9MT" when it is not clearly visible.
-- Do not include any markdown fences, commentary, or notes. Return raw JSON only.
-""".strip()
+def _resolve_api_key():
+    try:
+        return os.getenv("GOOGLE_API_KEY") or os.getenv("GENAI_API_KEY") or st.secrets.get("GOOGLE_API_KEY", "")
+    except Exception:
+        return os.getenv("GOOGLE_API_KEY") or os.getenv("GENAI_API_KEY") or ""
+
+
+API_KEY = _resolve_api_key()
 
 
 def file_to_part(uploaded_file):
     file_bytes = uploaded_file.getvalue()
     extension = uploaded_file.name.rsplit(".", 1)[-1].lower()
-    mime_type = MIME_TYPES[extension]
+    mime_type = MIME_TYPES.get(extension, "application/octet-stream")
 
     if extension in {"png", "jpg", "jpeg"}:
         Image.open(io.BytesIO(file_bytes))
-    elif extension == "pdf":
-        pypdf.PdfReader(io.BytesIO(file_bytes))
-
     return types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
 
 
-def extract_json_text(raw_text):
+def extract_json_text(raw_text: str) -> str:
     cleaned = raw_text.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
@@ -322,24 +63,12 @@ def extract_json_text(raw_text):
     return cleaned.strip()
 
 
-def is_jar_item(description):
-    normalized = description.lower().replace(" ", "")
-    return "20ltr" in normalized or re.search(r"\d+\s*ltr", description.lower())
-
-
-def is_case_item(description):
-    normalized = description.lower()
-    return "ml" in normalized and not is_jar_item(description)
-
-
-def parse_item_quantity(item):
+def parse_item_quantity(item: Dict[str, Any]) -> float:
     quantity = item.get("quantity") if item.get("quantity") is not None else item.get("qty")
     if quantity is None:
         return 0.0
-
     if isinstance(quantity, (int, float)):
         return float(quantity)
-
     if isinstance(quantity, str):
         cleaned = quantity.replace(",", "")
         match = re.search(r"[-+]?\d*\.?\d+", cleaned)
@@ -351,34 +80,60 @@ def parse_item_quantity(item):
     return 0.0
 
 
-def apply_case_jar_logic(record):
+def _normalize_unit(unit: Any) -> str:
+    if not unit:
+        return ""
+    return str(unit).strip().lower()
+
+
+def is_jar_item(description: str) -> bool:
+    normalized = description.lower().replace(" ", "")
+    return "20ltr" in normalized or re.search(r"\d+\s*ltr", description.lower())
+
+
+def is_case_item(description: str) -> bool:
+    normalized = description.lower()
+    return "ml" in normalized and not is_jar_item(description)
+
+
+def _extract_items(record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    items = record.get("items") or record.get("line_items") or record.get("details")
+    if not isinstance(items, list):
+        return []
+    extracted = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        description = str(item.get("description", item.get("item", ""))).strip()
+        quantity = parse_item_quantity(item)
+        unit = str(item.get("unit", item.get("uom", item.get("uom_code", "")))).strip()
+        extracted.append({"description": description, "quantity": quantity, "unit": unit})
+    return extracted
+
+
+def apply_case_jar_logic(record: Dict[str, Any]) -> Dict[str, Any]:
     case_qty = 0.0
     jar_qty = 0.0
-    has_items = False
+    review_flag = False
+    items = _extract_items(record)
 
-    items = record.get("items", [])
-    if isinstance(items, list) and items:
-        has_items = True
+    if items:
         for item in items:
-            if not isinstance(item, dict):
+            description = item.get("description", "")
+            quantity = item.get("quantity", 0.0)
+            unit = _normalize_unit(item.get("unit", ""))
+            desc_low = description.lower()
+            # skip footer/total lines
+            if any(tok in desc_low for tok in ("total", "subtotal", "gross", "amount", "net", "balance", "round")):
                 continue
-
-            description = str(item.get("description", ""))
-            quantity = parse_item_quantity(item)
-
-            if is_jar_item(description):
+            if is_jar_item(description) or "ltr" in unit or "ltr" in desc_low:
                 jar_qty += quantity
-            elif is_case_item(description):
+            elif is_case_item(description) or "ml" in unit or "ml" in desc_low:
                 case_qty += quantity
             else:
-                # If the item description is ambiguous, prefer jar only if it mentions LTR,
-                # otherwise treat numeric values as case if it mentions ML / mL.
-                if "ltr" in description.lower():
-                    jar_qty += quantity
-                elif "ml" in description.lower():
-                    case_qty += quantity
-
-    if not has_items:
+                if quantity and quantity != 0:
+                    review_flag = True
+    else:
         try:
             case_qty = float(record.get("Case", 0) or 0)
         except (TypeError, ValueError):
@@ -387,13 +142,8 @@ def apply_case_jar_logic(record):
             jar_qty = float(record.get("Jar", 0) or 0)
         except (TypeError, ValueError):
             jar_qty = 0.0
-
-    case_value = ""
-    jar_value = ""
-    if case_qty:
-        case_value = int(case_qty) if case_qty == int(case_qty) else case_qty
-    if jar_qty:
-        jar_value = int(jar_qty) if jar_qty == int(jar_qty) else jar_qty
+        if case_qty > 0 and jar_qty > 0:
+            review_flag = True
 
     return {
         "Date": record.get("Date", ""),
@@ -403,178 +153,270 @@ def apply_case_jar_logic(record):
         "Customer Name": record.get("Customer Name", ""),
         "To": record.get("To", ""),
         "Vehicle Type": record.get("Vehicle Type", "") or "9MT",
-        "Case": case_value,
-        "Jar": jar_value,
+        "Case": float(case_qty or 0.0),
+        "Jar": float(jar_qty or 0.0),
+        "requires_review": review_flag or (case_qty > 0 and jar_qty > 0),
+        "raw_items": items,
     }
 
 
-def parse_gemini_response(raw_text):
+SYSTEM_INSTRUCTION = """
+You are auditing a combined batch of logistics delivery sheets for Ubiquity Transtech.
+Scan all attached documents together and extract every single distinct trip row you find across all files.
+
+Return ONLY a single valid JSON list of objects. Each object represents one invoice trip row and must contain at least these keys:
+- "Date"
+- "Invoice No."
+- "Vehicle No."
+- "From"
+- "Customer Name"
+- "To"
+- "Vehicle Type"
+- "Case"
+- "Jar"
+
+If you can include an optional "items" array for each invoice that contains underlying line item details with quantity and unit type.
+Treat all attached documents as one consolidated batch and aggregate the final result across the whole upload.
+If an item mentions "LTR" treat as Jar; if an item mentions "ML" treat as Case.
+Do not include any markdown; return raw JSON only.
+"""
+
+
+def parse_gemini_response(raw_text: str) -> List[Dict[str, Any]]:
     payload = json.loads(extract_json_text(raw_text))
     if isinstance(payload, dict):
         payload = payload.get("trips") or payload.get("records") or payload.get("data") or [payload]
     if not isinstance(payload, list):
         raise ValueError("Gemini response must be a JSON array of trip records.")
-
     return [apply_case_jar_logic(record) for record in payload if isinstance(record, dict)]
 
 
 def build_batch_content_parts(uploaded_files):
     content_parts = []
     for uploaded_file in uploaded_files:
-        content_parts.append(
-            types.Part.from_text(text=f"Document: {uploaded_file.name}")
-        )
+        content_parts.append(types.Part.from_text(text=f"Document: {uploaded_file.name}"))
         content_parts.append(file_to_part(uploaded_file))
     return content_parts
 
 
-def is_retryable_error(error):
-    error_text = f"{type(error).__name__}: {error}".lower()
-    retry_tokens = [
-        "503",
-        "service unavailable",
-        "temporarily unavailable",
-        "overloaded",
-        "429",
-        "resource exhausted",
-        "too many requests",
-        "rate limit",
-        "502",
-        "504",
-        "500",
-        "backend error",
-    ]
-    return any(token in error_text for token in retry_tokens)
-
-
 def analyze_bills(uploaded_files):
+    if genai is None:
+        raise RuntimeError("google-genai not installed in this environment")
     if not API_KEY:
-        raise ValueError(
-            "Missing API key. Set GOOGLE_API_KEY in the environment or add it to Streamlit secrets."
-        )
-
+        raise ValueError("Missing API key. Set GOOGLE_API_KEY in the environment or add it to Streamlit secrets.")
     client = genai.Client(api_key=API_KEY)
     content_parts = build_batch_content_parts(uploaded_files)
 
     last_error = None
-    for model_name in MODEL_FALLBACKS:
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=content_parts,
-                    config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION),
-                )
-                return parse_gemini_response(response.text)
-            except Exception as e:
-                last_error = e
-                error_text = str(e).lower()
-
-                if "not_found" in error_text or "not found" in error_text:
-                    st.warning(f"Model {model_name} unavailable; switching to next available model.")
-                    break
-
-                if attempt < MAX_RETRIES:
-                    st.warning(
-                        f"Google servers busy on {model_name}; retrying in 4 seconds... ({attempt}/{MAX_RETRIES})"
-                    )
-                    time.sleep(INITIAL_BACKOFF_SECONDS)
-                    continue
-
-                st.warning(f"Exhausted retries for {model_name}; trying the next available model.")
-                break
-
+    for model_name in ["gemini-flash-lite-latest", "gemini-flash-latest"]:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=content_parts,
+                config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION),
+            )
+            return parse_gemini_response(response.text)
+        except Exception as e:
+            last_error = e
+            time.sleep(1)
+            continue
     if last_error is not None:
         raise last_error
-
     return []
 
 
-st.set_page_config(
-    page_title="Project Kill Bill",
-    page_icon="",
-    layout="wide",
-)
+def load_freight_matrix(path: str) -> Optional[pd.DataFrame]:
+    if not os.path.exists(path):
+        return None
+    try:
+        df = pd.read_csv(path)
+        return df
+    except Exception:
+        try:
+            return pd.read_excel(path)
+        except Exception:
+            return None
 
-st.markdown(PREMIUM_CSS, unsafe_allow_html=True)
 
-st.markdown(
-    """
-    <div class="premium-title-wrap">
-        <div class="title-kicker">Billing Operations Suite</div>
-        <h1 class="premium-title">Project <span>Kill Bill</span></h1>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+def find_customer_column(df: pd.DataFrame) -> str:
+    candidates = [c for c in df.columns if re.search(r"customer|distributor|name", c, re.I)]
+    return candidates[0] if candidates else df.columns[0]
 
-st.markdown(
-    """
-    <div class="onboarding-grid">
-        <div class="onboarding-card">
-            <div class="onboarding-step">Step 1</div>
-            <h4>Upload Bills</h4>
-            <p>Drag and drop up to 30 hard-copy Bisleri invoice photos or a single combined PDF document.</p>
-        </div>
-        <div class="onboarding-card">
-            <div class="onboarding-step">Step 2</div>
-            <h4>System Audit</h4>
-            <p>Click <strong>Process Bills</strong> to let the AI scan, analyze, and sort quantities into Cases and Jars automatically.</p>
-        </div>
-        <div class="onboarding-card">
-            <div class="onboarding-step">Step 3</div>
-            <h4>Review & Export</h4>
-            <p>Live-edit any values directly inside the data grid below and click <strong>Download</strong> to save your final production Excel sheet.</p>
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
 
-st.markdown('<div class="section-label">Upload Bisleri Bills</div>', unsafe_allow_html=True)
+def find_depot_column(df: pd.DataFrame, from_value: str) -> Optional[str]:
+    # find column whose name appears in from_value
+    if not isinstance(from_value, str):
+        return None
+    from_low = from_value.lower()
+    depot_cols = [c for c in df.columns if c not in [find_customer_column(df)]]
+    # prefer exact substring match
+    for c in depot_cols:
+        if c.lower() in from_low:
+            return c
+    # fallback: try tokens
+    for token in ["thane", "mumbai", "vasai", "palghar"]:
+        for c in depot_cols:
+            if token in c.lower() and token in from_low:
+                return c
+    return None
 
-uploaded_files = st.file_uploader(
-    "Upload one or more bill images or PDFs",
-    type=["png", "jpg", "jpeg", "pdf"],
-    accept_multiple_files=True,
-)
 
-if uploaded_files:
-    file_count = len(uploaded_files)
-    st.markdown(
-        f"""
-        <div class="upload-status">
-            {file_count} file{'s' if file_count != 1 else ''} uploaded successfully.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+def lookup_freight_for_row(master_df: pd.DataFrame, customer: str, from_loc: str) -> Optional[float]:
+    if master_df is None or master_df.empty:
+        return None
+    cust_col = find_customer_column(master_df)
+    # case-insensitive match exact or contains
+    mask = master_df[cust_col].astype(str).str.strip().str.lower() == str(customer).strip().lower()
+    if not mask.any():
+        mask = master_df[cust_col].astype(str).str.lower().str.contains(str(customer).strip().lower(), na=False)
+    if not mask.any():
+        return None
+    row = master_df[mask].iloc[0]
+    depot_col = find_depot_column(master_df, from_loc)
+    if depot_col is None:
+        return None
+    val = row.get(depot_col)
+    if pd.isna(val) or val == "":
+        return None
+    try:
+        return float(val)
+    except Exception:
+        return None
 
-if st.button("Process Bills", disabled=not uploaded_files):
-    with st.spinner("AI is analyzing documents..."):
+
+st.set_page_config(page_title="Project Kill Bill", layout="wide")
+
+st.title("Project Kill Bill — Freight-aware Invoice Aggregator")
+
+st.markdown("Upload bills (images or PDFs), process, and download an Excel report with Freight Charges.")
+
+uploaded_files = st.file_uploader("Upload one or more bill images or PDFs", type=["png", "jpg", "jpeg", "pdf"], accept_multiple_files=True)
+
+master_df = load_freight_matrix(FREIGHT_MATRIX_CSV)
+if master_df is None:
+    st.warning(f"Freight matrix file not found: {FREIGHT_MATRIX_CSV}. Freight lookups will be blank.")
+else:
+    st.success(f"Loaded freight matrix with {len(master_df)} rows from {FREIGHT_MATRIX_CSV}")
+
+if st.button("Process Bills", disabled=(not uploaded_files)):
+    with st.spinner("Processing bills and computing freight..."):
         try:
             records = analyze_bills(uploaded_files)
-            st.session_state["bill_data"] = pd.DataFrame(records, columns=COLUMNS)
+            if not records:
+                st.error("No records extracted from the uploaded files.")
+            df = pd.DataFrame(records)
+
+            # ensure numeric
+            for c in ("Case", "Jar"):
+                if c not in df.columns:
+                    df[c] = 0.0
+                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+
+            # normalize invoice
+            df["Invoice No."] = df.get("Invoice No.", "").astype(str).str.strip()
+
+            # Build invoice grouping key: trailing digits
+            df["invoice_digits"] = df["Invoice No."].str.findall(r"\d+").apply(lambda parts: "".join(parts))
+            df["invoice_group_key"] = df["invoice_digits"].str[-8:]
+            df.loc[~df["invoice_group_key"].astype(bool), "invoice_group_key"] = (
+                df.loc[~df["invoice_group_key"].astype(bool), "Invoice No."].str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
+            )
+
+            # aggregate by invoice_group_key but merge raw_items
+            agg_rows = []
+            for key, group in df.groupby("invoice_group_key", dropna=False):
+                first = group.iloc[0]
+                merged_items = []
+                for sub in group.get("raw_items", []):
+                    if isinstance(sub, list):
+                        merged_items.extend(sub)
+                # sum Case/Jar from merged_items when possible
+                case_sum = 0.0
+                jar_sum = 0.0
+                review_flag = False
+                if merged_items:
+                    for it in merged_items:
+                        desc = str(it.get("description", "")).strip()
+                        qty = parse_item_quantity(it)
+                        u = _normalize_unit(it.get("unit", ""))
+                        dlow = desc.lower()
+                        if any(tok in dlow for tok in ("total", "subtotal", "gross", "amount", "net", "balance", "round")):
+                            continue
+                        if is_jar_item(desc) or "ltr" in u or "ltr" in dlow:
+                            jar_sum += qty
+                        elif is_case_item(desc) or "ml" in u or "ml" in dlow:
+                            case_sum += qty
+                        else:
+                            if qty and qty != 0:
+                                review_flag = True
+                else:
+                    case_sum = group["Case"].sum()
+                    jar_sum = group["Jar"].sum()
+                    review_flag = group["requires_review"].any() if "requires_review" in group.columns else False
+
+                agg_rows.append({
+                    "Date": first.get("Date", ""),
+                    "Invoice No.": first.get("Invoice No.", ""),
+                    "Vehicle No.": first.get("Vehicle No.", ""),
+                    "From": first.get("From", ""),
+                    "Customer Name": first.get("Customer Name", ""),
+                    "To": first.get("To", ""),
+                    "Vehicle Type": first.get("Vehicle Type", "") or "9MT",
+                    "Case": case_sum,
+                    "Jar": jar_sum,
+                    "requires_review": review_flag or (case_sum > 0 and jar_sum > 0),
+                    "raw_items": merged_items,
+                })
+
+            agg = pd.DataFrame(agg_rows)
+
+            # lookup freight per aggregated row
+            freight_vals = []
+            for _, r in agg.iterrows():
+                cust = r.get("Customer Name", "")
+                from_loc = r.get("From", "")
+                val = lookup_freight_for_row(master_df, cust, from_loc) if master_df is not None else None
+                freight_vals.append(val)
+            agg["Freight Charges"] = freight_vals
+
+            # ensure Sr No.
+            if "Sr No." not in agg.columns:
+                agg.insert(0, "Sr No.", range(1, len(agg) + 1))
+
+            # reorder to required COLUMNS
+            final_cols = [c for c in COLUMNS if c in agg.columns]
+            result_df = agg[final_cols].copy()
+
+            # show styled dataframe highlighting blank freight
+            def highlight_freight_missing(row):
+                return ["background-color: #fff3b0" if (pd.isna(row.get("Freight Charges")) or row.get("Freight Charges") == "") else "" for _ in row]
+
+            st.markdown("**Review & Edit Extracted Data**")
+            styled = result_df.style.apply(highlight_freight_missing, axis=1)
+            st.dataframe(styled, use_container_width=True)
+
+            # editable grid (keeps same data)
+            edited = st.data_editor(result_df, num_rows="dynamic", use_container_width=True, hide_index=True)
+            st.session_state["bill_data"] = edited
+
+            # Download as XLSX
+            def to_xlsx_bytes(df_export: pd.DataFrame) -> bytes:
+                out = io.BytesIO()
+                try:
+                    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+                        df_export.to_excel(writer, index=False, sheet_name="Bisleri Report")
+                    return out.getvalue()
+                except Exception:
+                    return df_export.to_csv(index=False).encode("utf-8")
+
+            st.download_button(label="Download Excel (.xlsx)", data=to_xlsx_bytes(edited), mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", file_name="Bisleri Report.xlsx")
+
+            st.success("Processing complete. Blank Freight Charges rows are highlighted for manual entry.")
+
         except json.JSONDecodeError:
             st.error("Gemini returned invalid JSON. Please try processing again.")
         except Exception as error:
             st.error(f"Failed to process bills: {error}")
 
-if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
-    st.subheader("Review & Edit Extracted Data")
-
-    edited_df = st.data_editor(
-        st.session_state["bill_data"],
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    st.session_state["bill_data"] = edited_df
-
-    st.download_button(
-        label="Download CSV",
-        data=edited_df.to_csv(index=False).encode("utf-8"),
-        mime="text/csv",
-        file_name="bisleri_billing_data.csv",
-    )
+else:
+    st.info("Upload files then click 'Process Bills' to begin.")

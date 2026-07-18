@@ -262,6 +262,7 @@ COLUMNS = [
     "Invoice No.",
     "Vehicle No.",
     "From",
+    "Customer Code",
     "Customer Name",
     "To",
     "Vehicle Type",
@@ -285,6 +286,7 @@ Return ONLY a single valid JSON list of objects. Each object represents one invo
 - "Invoice No."
 - "Vehicle No."
 - "From"
+- "Customer Code"
 - "Customer Name"
 - "To"
 - "Vehicle Type"
@@ -293,6 +295,7 @@ Return ONLY a single valid JSON list of objects. Each object represents one invo
 
 Rules:
 - Treat all attached documents as one consolidated batch and aggregate the final result across the whole upload.
+- Extract "Customer Code" only from the "Customer Code:" field in the "Shipped To" section. Do not confuse it with Customer Reference, GSTIN, Invoice Number, or any other identifier.
 - If an item mentions "LTR" or "20 LTR", put its quantity into "Jar" and leave "Case" empty for that item.
 - If an item mentions "ML", put its quantity into "Case" and leave "Jar" empty for that item.
 - If a record contains both LTR and ML items, include both quantities in the same object with Case and Jar separated accordingly.
@@ -395,11 +398,18 @@ def apply_case_jar_logic(record):
     if jar_qty:
         jar_value = int(jar_qty) if jar_qty == int(jar_qty) else jar_qty
 
+    customer_code = record.get("Customer Code", "")
+    if customer_code is None:
+        customer_code = ""
+    else:
+        customer_code = str(customer_code).strip().upper().replace(" ", "")
+
     return {
         "Date": record.get("Date", ""),
         "Invoice No.": record.get("Invoice No.", record.get("Invoice No", "")),
         "Vehicle No.": record.get("Vehicle No.", record.get("Vehicle No", "")),
         "From": record.get("From", ""),
+        "Customer Code": customer_code,
         "Customer Name": record.get("Customer Name", ""),
         "To": record.get("To", ""),
         "Vehicle Type": record.get("Vehicle Type", "") or "9MT",

@@ -302,8 +302,9 @@ Rules:
 - "To": begin immediately AFTER the Customer Name. Concatenate every subsequent physical-address line, in order, into one value. Stop before the first administrative field: State Code, GSTIN, PAN, Phone, Email, FSSAI, Payment Terms, or any tax identifier.
 - "To" must contain delivery-address text only. Never include Customer Name, Customer Code, GSTIN, or any administrative field or value.
 - Example: for "Customer Code : MUMCO02703" followed by "SANTKRIPA DUGDHALAYA(KALYAN-E)", then "GODAVARI BLDG SHOP NO 4 LOKGRAM", "KALYAN CITY NETIVALI KALYAN EAST", "THANE 421306", and then "State Code : MH": Customer Name is "SANTKRIPA DUGDHALAYA(KALYAN-E)" and To is "GODAVARI BLDG SHOP NO 4 LOKGRAM, KALYAN CITY, NETIVALI, KALYAN EAST, THANE 421306".
-- Extract EVERY product line exactly as printed on the invoice into "items". Each item must contain exactly "description" (the complete printed product description) and "quantity" (the printed quantity). Do not combine, omit, or summarize product lines.
-- Always include "Case" and "Jar" with a value of 0. Their values will be calculated from "items" after extraction.
+- Extract EVERY product line exactly as printed on the invoice into "items". Each item must contain exactly "description" (the complete printed product description) and "qty" (the printed quantity).
+- Keep every product row separate. Never combine rows, total quantities, or classify any item as Case or Jar.
+- Always include "Case" and "Jar" with a value of 0. Do not calculate their totals; their values will be calculated from "items" after extraction.
 - Vehicle Type should default to "9MT" when it is not clearly visible.
 - Do not include any markdown fences, commentary, or notes. Return raw JSON only.
 """.strip()
@@ -331,7 +332,8 @@ def extract_json_text(raw_text):
 
 
 def is_jar_item(description):
-    return bool(re.search(r"\b(?:10|20)\s*LTR\b", str(description), re.IGNORECASE))
+    normalized = re.sub(r"[\s.\-]", "", str(description).upper())
+    return bool(re.search(r"(?<!\d)(?:10|20)LTR(?!\d)", normalized))
 
 
 def parse_item_quantity(item):
@@ -371,12 +373,16 @@ def apply_case_jar_logic(record):
             else:
                 case_qty += quantity
 
-    case_value = ""
-    jar_value = ""
+    case_value = 0
+    jar_value = 0
     if case_qty:
         case_value = int(case_qty) if case_qty == int(case_qty) else case_qty
     if jar_qty:
         jar_value = int(jar_qty) if jar_qty == int(jar_qty) else jar_qty
+
+    record["Case"] = case_value
+    record["Jar"] = jar_value
+    record.pop("items", None)
 
     customer_code = record.get("Customer Code", "")
     if customer_code is None:

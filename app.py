@@ -292,6 +292,7 @@ Return ONLY a single valid JSON list of objects. Each object represents one invo
 - "Vehicle Type"
 - "Case"
 - "Jar"
+- "items" (an array of product-line objects)
 
 Rules:
 - Treat all attached documents as one consolidated batch and aggregate the final result across the whole upload.
@@ -301,9 +302,8 @@ Rules:
 - "To": begin immediately AFTER the Customer Name. Concatenate every subsequent physical-address line, in order, into one value. Stop before the first administrative field: State Code, GSTIN, PAN, Phone, Email, FSSAI, Payment Terms, or any tax identifier.
 - "To" must contain delivery-address text only. Never include Customer Name, Customer Code, GSTIN, or any administrative field or value.
 - Example: for "Customer Code : MUMCO02703" followed by "SANTKRIPA DUGDHALAYA(KALYAN-E)", then "GODAVARI BLDG SHOP NO 4 LOKGRAM", "KALYAN CITY NETIVALI KALYAN EAST", "THANE 421306", and then "State Code : MH": Customer Name is "SANTKRIPA DUGDHALAYA(KALYAN-E)" and To is "GODAVARI BLDG SHOP NO 4 LOKGRAM, KALYAN CITY, NETIVALI, KALYAN EAST, THANE 421306".
-- If an item mentions "LTR" or "20 LTR", put its quantity into "Jar" and leave "Case" empty for that item.
-- If an item mentions "ML", put its quantity into "Case" and leave "Jar" empty for that item.
-- If a record contains both LTR and ML items, include both quantities in the same object with Case and Jar separated accordingly.
+- Extract EVERY product line exactly as printed on the invoice into "items". Each item must contain exactly "description" (the complete printed product description) and "quantity" (the printed quantity). Do not combine, omit, or summarize product lines.
+- Always include "Case" and "Jar" with a value of 0. Their values will be calculated from "items" after extraction.
 - Vehicle Type should default to "9MT" when it is not clearly visible.
 - Do not include any markdown fences, commentary, or notes. Return raw JSON only.
 """.strip()
@@ -331,13 +331,7 @@ def extract_json_text(raw_text):
 
 
 def is_jar_item(description):
-    normalized = description.lower().replace(" ", "")
-    return "20ltr" in normalized or re.search(r"\d+\s*ltr", description.lower())
-
-
-def is_case_item(description):
-    normalized = description.lower()
-    return "ml" in normalized and not is_jar_item(description)
+    return bool(re.search(r"\b(?:10|20)\s*LTR\b", str(description), re.IGNORECASE))
 
 
 def parse_item_quantity(item):
@@ -362,11 +356,9 @@ def parse_item_quantity(item):
 def apply_case_jar_logic(record):
     case_qty = 0.0
     jar_qty = 0.0
-    has_items = False
 
     items = record.get("items", [])
-    if isinstance(items, list) and items:
-        has_items = True
+    if isinstance(items, list):
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -376,25 +368,8 @@ def apply_case_jar_logic(record):
 
             if is_jar_item(description):
                 jar_qty += quantity
-            elif is_case_item(description):
-                case_qty += quantity
             else:
-                # If the item description is ambiguous, prefer jar only if it mentions LTR,
-                # otherwise treat numeric values as case if it mentions ML / mL.
-                if "ltr" in description.lower():
-                    jar_qty += quantity
-                elif "ml" in description.lower():
-                    case_qty += quantity
-
-    if not has_items:
-        try:
-            case_qty = float(record.get("Case", 0) or 0)
-        except (TypeError, ValueError):
-            case_qty = 0.0
-        try:
-            jar_qty = float(record.get("Jar", 0) or 0)
-        except (TypeError, ValueError):
-            jar_qty = 0.0
+                case_qty += quantity
 
     case_value = ""
     jar_value = ""

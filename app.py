@@ -295,7 +295,12 @@ Return ONLY a single valid JSON list of objects. Each object represents one invo
 
 Rules:
 - Treat all attached documents as one consolidated batch and aggregate the final result across the whole upload.
-- Extract "Customer Code" only from the "Customer Code:" field in the "Shipped To" section. Do not confuse it with Customer Reference, GSTIN, Invoice Number, or any other identifier.
+- Extract the "Shipped To" section in this exact order: Customer Code, Customer Name, address lines, then administrative fields.
+- "Customer Code": extract only the value after "Customer Code :" (or "Customer Code:") in the "Shipped To" section. Do not use any other identifier.
+- "Customer Name": extract ONLY the first text line immediately after Customer Code. It must be exactly one business/company name and must not contain any address text.
+- "To": begin immediately AFTER the Customer Name. Concatenate every subsequent physical-address line, in order, into one value. Stop before the first administrative field: State Code, GSTIN, PAN, Phone, Email, FSSAI, Payment Terms, or any tax identifier.
+- "To" must contain delivery-address text only. Never include Customer Name, Customer Code, GSTIN, or any administrative field or value.
+- Example: for "Customer Code : MUMCO02703" followed by "SANTKRIPA DUGDHALAYA(KALYAN-E)", then "GODAVARI BLDG SHOP NO 4 LOKGRAM", "KALYAN CITY NETIVALI KALYAN EAST", "THANE 421306", and then "State Code : MH": Customer Name is "SANTKRIPA DUGDHALAYA(KALYAN-E)" and To is "GODAVARI BLDG SHOP NO 4 LOKGRAM, KALYAN CITY, NETIVALI, KALYAN EAST, THANE 421306".
 - If an item mentions "LTR" or "20 LTR", put its quantity into "Jar" and leave "Case" empty for that item.
 - If an item mentions "ML", put its quantity into "Case" and leave "Jar" empty for that item.
 - If a record contains both LTR and ML items, include both quantities in the same object with Case and Jar separated accordingly.

@@ -13,6 +13,12 @@ from google import genai
 from google.genai import types
 from PIL import Image
 
+from customer_master import (
+    apply_customer_master_lookup,
+    build_customer_lookup,
+    load_customer_master,
+)
+
 try:
     streamlit_api_key = st.secrets.get("GOOGLE_API_KEY", "")
 except st.errors.StreamlitSecretNotFoundError:
@@ -272,6 +278,7 @@ COLUMNS = [
     "Vehicle Type",
     "Case",
     "Jar",
+    "Lookup Status",
 ]
 
 MIME_TYPES = {
@@ -664,6 +671,8 @@ if st.button("Process Bills", disabled=not uploaded_files):
     with st.spinner("AI is analyzing documents..."):
         try:
             records = analyze_bills(uploaded_files)
+            customer_lookup = build_customer_lookup(load_customer_master())
+            records = apply_customer_master_lookup(records, customer_lookup)
             st.session_state["bill_data"] = pd.DataFrame(records, columns=COLUMNS)
             for record in records:
                 log_processed_invoice(record.get("Invoice No.", record.get("Invoice No", "")))

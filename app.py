@@ -13,11 +13,12 @@ from google import genai
 from google.genai import types
 from PIL import Image
 
-API_KEY = (
-    os.getenv("GOOGLE_API_KEY")
-    or os.getenv("GENAI_API_KEY")
-    or st.secrets.get("GOOGLE_API_KEY", "")
-)
+try:
+    streamlit_api_key = st.secrets.get("GOOGLE_API_KEY", "")
+except st.errors.StreamlitSecretNotFoundError:
+    streamlit_api_key = ""
+
+API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GENAI_API_KEY") or streamlit_api_key
 MODEL_FALLBACKS = [
     "gemini-flash-lite-latest",
     "gemini-flash-latest",
@@ -335,8 +336,8 @@ def extract_json_text(raw_text):
 
 
 def is_jar_item(description):
-    normalized = re.sub(r"[\s.\-]", "", str(description).upper())
-    return bool(re.search(r"(?<!\d)(?:10|20)LTR(?!\d)", normalized))
+    normalized = str(description).upper()
+    return bool(re.search(r"(?<!\d)(?:10|20)[\s.\-]*LTR", normalized))
 
 
 def parse_item_quantity(item):
@@ -414,7 +415,28 @@ def parse_gemini_response(raw_text):
     if not isinstance(payload, list):
         raise ValueError("Gemini response must be a JSON array of trip records.")
 
-    return [apply_case_jar_logic(record) for record in payload if isinstance(record, dict)]
+    processed_records = []
+    for record in payload:
+        if not isinstance(record, dict):
+            continue
+
+        items = record.get("items", [])
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    print(
+                        f'description="{item.get("description", "")}" '
+                        f'qty={item.get("qty", item.get("quantity", ""))}'
+                    )
+        processed_record = apply_case_jar_logic(record)
+        print(
+            "DEBUG recalculated quantities after apply_case_jar_logic "
+            f"(invoice={processed_record.get('Invoice No.', '')}): "
+            f"Case={processed_record.get('Case', 0)}, Jar={processed_record.get('Jar', 0)}"
+        )
+        processed_records.append(processed_record)
+
+    return processed_records
 
 
 def build_batch_content_parts(uploaded_files):
@@ -464,6 +486,8 @@ def analyze_bills(uploaded_files):
                     contents=content_parts,
                     config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION),
                 )
+                print("DEBUG raw Gemini response before parse_gemini_response:")
+                print(response.text)
                 return parse_gemini_response(response.text)
             except Exception as e:
                 last_error = e

@@ -2,7 +2,9 @@ import io
 import json
 import os
 import re
+import sqlite3
 import time
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import pypdf
@@ -25,6 +27,7 @@ MODEL_FALLBACKS = [
 ]
 MAX_RETRIES = 5
 INITIAL_BACKOFF_SECONDS = 4
+DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "billing_history.db")
 
 PREMIUM_CSS = """
 <style>
@@ -486,6 +489,69 @@ def analyze_bills(uploaded_files):
     return []
 
 
+def init_database():
+    """Create the lightweight invoice-processing history store when needed."""
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS billing_history (
+                invoice_no TEXT PRIMARY KEY,
+                processed_timestamp TEXT NOT NULL
+            )
+            """
+        )
+
+
+def log_processed_invoice(invoice_no):
+    """Record one successfully processed invoice, ignoring invoices already logged."""
+    normalized_invoice_no = str(invoice_no or "").strip()
+    if not normalized_invoice_no:
+        return
+
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO billing_history (invoice_no, processed_timestamp)
+            VALUES (?, ?)
+            """,
+            (normalized_invoice_no, datetime.now().isoformat(timespec="seconds")),
+        )
+
+
+def _get_processed_count(start_date, end_date):
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        result = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM billing_history
+            WHERE DATE(processed_timestamp) BETWEEN ? AND ?
+            """,
+            (start_date.isoformat(), end_date.isoformat()),
+        ).fetchone()
+    return result[0]
+
+
+def get_today_count():
+    today = date.today()
+    return _get_processed_count(today, today)
+
+
+def get_week_count():
+    today = date.today()
+    return _get_processed_count(today - timedelta(days=today.weekday()), today)
+
+
+def get_month_count():
+    today = date.today()
+    return _get_processed_count(today.replace(day=1), today)
+
+
+def get_custom_count(start_date, end_date):
+    if start_date > end_date:
+        return 0
+    return _get_processed_count(start_date, end_date)
+
+
 st.set_page_config(
     page_title="Project Kill Bill",
     page_icon="",
@@ -504,28 +570,52 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown(
-    """
-    <div class="onboarding-grid">
+init_database()
+
+st.markdown('<div class="section-label">Billing Dashboard</div>', unsafe_allow_html=True)
+today_column, week_column, month_column = st.columns(3)
+for column, label, value in (
+    (today_column, "Today's Bills", get_today_count()),
+    (week_column, "This Week", get_week_count()),
+    (month_column, "This Month", get_month_count()),
+):
+    with column:
+        st.markdown(
+            f"""
+            <div class="onboarding-card">
+                <h4>{label}</h4>
+                <p>{value:,}</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+st.markdown('<div class="section-label">Custom Report</div>', unsafe_allow_html=True)
+from_column, to_column, generate_column = st.columns([1, 1, 0.7])
+with from_column:
+    start_date = st.date_input("From Date", value=date.today(), key="custom_report_start")
+with to_column:
+    end_date = st.date_input("To Date", value=date.today(), key="custom_report_end")
+with generate_column:
+    st.write("")
+    generate_report = st.button("Generate", key="generate_custom_report")
+
+if generate_report:
+    if start_date > end_date:
+        st.error("From Date must be on or before To Date.")
+    else:
+        st.session_state["custom_report_count"] = get_custom_count(start_date, end_date)
+
+if "custom_report_count" in st.session_state:
+    st.markdown(
+        f"""
         <div class="onboarding-card">
-            <div class="onboarding-step">Step 1</div>
-            <h4>Upload Bills</h4>
-            <p>Drag and drop up to 30 hard-copy Bisleri invoice photos or a single combined PDF document.</p>
+            <h4>Invoices Processed</h4>
+            <p>{st.session_state['custom_report_count']:,}</p>
         </div>
-        <div class="onboarding-card">
-            <div class="onboarding-step">Step 2</div>
-            <h4>System Audit</h4>
-            <p>Click <strong>Process Bills</strong> to let the AI scan, analyze, and sort quantities into Cases and Jars automatically.</p>
-        </div>
-        <div class="onboarding-card">
-            <div class="onboarding-step">Step 3</div>
-            <h4>Review & Export</h4>
-            <p>Live-edit any values directly inside the data grid below and click <strong>Download</strong> to save your final production Excel sheet.</p>
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+        """,
+        unsafe_allow_html=True,
+    )
 
 st.markdown('<div class="section-label">Upload Bisleri Bills</div>', unsafe_allow_html=True)
 
@@ -551,6 +641,8 @@ if st.button("Process Bills", disabled=not uploaded_files):
         try:
             records = analyze_bills(uploaded_files)
             st.session_state["bill_data"] = pd.DataFrame(records, columns=COLUMNS)
+            for record in records:
+                log_processed_invoice(record.get("Invoice No.", record.get("Invoice No", "")))
         except json.JSONDecodeError:
             st.error("Gemini returned invalid JSON. Please try processing again.")
         except Exception as error:

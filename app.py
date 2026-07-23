@@ -18,6 +18,7 @@ from customer_master import (
     build_customer_lookup,
     load_customer_master,
 )
+from freight_master import apply_freight_lookup, build_freight_lookup, normalize_loading_point
 
 try:
     streamlit_api_key = st.secrets.get("GOOGLE_API_KEY", "")
@@ -278,6 +279,7 @@ COLUMNS = [
     "Vehicle Type",
     "Case",
     "Jar",
+    "Freight Charge",
     "Lookup Status",
 ]
 
@@ -297,6 +299,7 @@ Return ONLY a single valid JSON list of objects. Each object represents one invo
 - "Invoice No."
 - "Vehicle No."
 - "From"
+- "Loading Point"
 - "Customer Code"
 - "Customer Name"
 - "To"
@@ -308,6 +311,7 @@ Return ONLY a single valid JSON list of objects. Each object represents one invo
 Rules:
 - Treat all attached documents as one consolidated batch and aggregate the final result across the whole upload.
 - Extract the "Shipped To" section in this exact order: Customer Code, Customer Name, address lines, then administrative fields.
+- "Loading Point": extract the invoice origin from the "Shipped From" section only. Normalize it to exactly one of Thane, Vasai, Andheri, Vidya Vihar, Bhiwandi, Kandivali, PRPL, Wada, Mahul, Khopoli, or Kamshet. Use null when it cannot be determined.
 - "Customer Code": extract only the value after "Customer Code :" (or "Customer Code:") in the "Shipped To" section. Do not use any other identifier.
 - "Customer Name": extract ONLY the first text line immediately after Customer Code. It must be exactly one business/company name and must not contain any address text.
 - "To": begin immediately AFTER the Customer Name. Concatenate every subsequent physical-address line, in order, into one value. Stop before the first administrative field: State Code, GSTIN, PAN, Phone, Email, FSSAI, Payment Terms, or any tax identifier.
@@ -406,6 +410,7 @@ def apply_case_jar_logic(record):
         "Invoice No.": record.get("Invoice No.", record.get("Invoice No", "")),
         "Vehicle No.": record.get("Vehicle No.", record.get("Vehicle No", "")),
         "From": record.get("From", ""),
+        "Loading Point": normalize_loading_point(record.get("Loading Point")),
         "Customer Code": customer_code,
         "Customer Name": record.get("Customer Name", ""),
         "To": record.get("To", ""),
@@ -671,8 +676,10 @@ if st.button("Process Bills", disabled=not uploaded_files):
     with st.spinner("AI is analyzing documents..."):
         try:
             records = analyze_bills(uploaded_files)
-            customer_lookup = build_customer_lookup(load_customer_master())
+            master_data = load_customer_master()
+            customer_lookup = build_customer_lookup(master_data)
             records = apply_customer_master_lookup(records, customer_lookup)
+            records = apply_freight_lookup(records, build_freight_lookup(master_data))
             st.session_state["bill_data"] = pd.DataFrame(records, columns=COLUMNS)
             for record in records:
                 log_processed_invoice(record.get("Invoice No.", record.get("Invoice No", "")))

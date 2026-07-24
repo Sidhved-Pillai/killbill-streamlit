@@ -20,6 +20,12 @@ from customer_master import (
 )
 from excel_export import build_excel_workbook, excel_export_filename
 from freight_master import apply_freight_lookup, build_freight_lookup, normalize_loading_point
+from invoice_history import (
+    get_processed_invoice,
+    init_invoice_history_database,
+    search_processed_invoices,
+    store_processed_invoice,
+)
 
 try:
     streamlit_api_key = st.secrets.get("GOOGLE_API_KEY", "")
@@ -185,6 +191,11 @@ PREMIUM_CSS = """
     [data-testid="stFileUploader"] span,
     [data-testid="stFileUploader"] div {
         color: #111111 !important;
+    }
+
+    [data-testid="stFileUploader"] button,
+    [data-testid="stFileUploader"] button * {
+        color: #FFFFFF !important;
     }
 
     [data-testid="stDataFrame"],
@@ -594,6 +605,90 @@ def get_custom_count(start_date, end_date):
     return _get_processed_count(start_date, end_date)
 
 
+def format_processed_timestamp(timestamp):
+    try:
+        return datetime.fromisoformat(timestamp).strftime("%d-%b-%Y %I:%M %p")
+    except (TypeError, ValueError):
+        return str(timestamp or "")
+
+
+def format_history_freight_charge(value):
+    if value in (None, ""):
+        return ""
+    try:
+        return f"₹ {float(value):,.2f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+@st.dialog("Processed Invoice Details")
+def show_processed_invoice_dialog(invoice):
+    details = (
+        ("Date Processed", format_processed_timestamp(invoice["processed_timestamp"])),
+        ("Invoice Date", invoice["invoice_date"]),
+        ("Invoice Number", invoice["invoice_number"]),
+        ("Vehicle Number", invoice["vehicle_number"]),
+        ("Customer Code", invoice["customer_code"]),
+        ("Customer Name", invoice["customer_name"]),
+        ("From", invoice["origin"]),
+        ("To", invoice["destination"]),
+        ("Vehicle Type", invoice["vehicle_type"]),
+        ("Cases", invoice["cases"]),
+        ("Jars", invoice["jars"]),
+        ("Freight Charge", format_history_freight_charge(invoice["freight_charge"])),
+        ("Lookup Status", invoice["lookup_status"]),
+    )
+    for label, value in details:
+        label_column, value_column = st.columns([0.38, 0.62])
+        label_column.markdown(f"**{label}**")
+        value_column.write("" if value is None else value)
+
+    if st.button("Close", key="close_processed_invoice_dialog"):
+        st.session_state["selected_history_invoice_id"] = None
+        st.rerun()
+
+
+def render_processed_invoice_history(database_path):
+    search_query = st.text_input(
+        "Search invoice history",
+        placeholder="Search by invoice number or customer name",
+        key="processed_invoice_history_search",
+    )
+    history_rows = search_processed_invoices(search_query, database_path)
+
+    with st.container(height=360, border=True):
+        header_columns = st.columns([1.5, 1.5, 2.2, 1.2, 0.7])
+        for column, label in zip(
+            header_columns,
+            (
+                "Date Processed",
+                "Invoice Number",
+                "Customer Name",
+                "Freight Charge",
+                "Actions",
+            ),
+        ):
+            column.markdown(f"**{label}**")
+
+        if not history_rows:
+            st.caption("No processed invoices found.")
+
+        for row in history_rows:
+            columns = st.columns([1.5, 1.5, 2.2, 1.2, 0.7])
+            columns[0].write(format_processed_timestamp(row["processed_timestamp"]))
+            columns[1].write(row["invoice_number"] or "")
+            columns[2].write(row["customer_name"] or "")
+            columns[3].write(format_history_freight_charge(row["freight_charge"]))
+            if columns[4].button("View", key=f"view_processed_invoice_{row['id']}"):
+                st.session_state["selected_history_invoice_id"] = row["id"]
+
+    selected_history_id = st.session_state.get("selected_history_invoice_id")
+    if selected_history_id is not None:
+        selected_invoice = get_processed_invoice(selected_history_id, database_path)
+        if selected_invoice is not None:
+            show_processed_invoice_dialog(selected_invoice)
+
+
 st.set_page_config(
     page_title="Project Kill Bill",
     page_icon="",
@@ -613,6 +708,7 @@ st.markdown(
 )
 
 init_database()
+init_invoice_history_database(DATABASE_PATH)
 
 st.markdown('<div class="section-label">Billing Dashboard</div>', unsafe_allow_html=True)
 today_column, week_column, month_column = st.columns(3)
@@ -631,6 +727,17 @@ for column, label, value in (
             """,
             unsafe_allow_html=True,
         )
+
+st.markdown('<div style="height: 1rem;"></div>', unsafe_allow_html=True)
+
+if st.button("Processed Invoice History", key="toggle_processed_invoice_history"):
+    st.session_state["show_processed_invoice_history"] = not st.session_state.get(
+        "show_processed_invoice_history",
+        False,
+    )
+
+if st.session_state.get("show_processed_invoice_history", False):
+    render_processed_invoice_history(DATABASE_PATH)
 
 st.markdown('<div class="section-label">Custom Report</div>', unsafe_allow_html=True)
 from_column, to_column, generate_column = st.columns([1, 1, 0.7])
@@ -689,6 +796,7 @@ if st.button("Process Bills", disabled=not uploaded_files):
             st.session_state["bill_data"] = pd.DataFrame(records, columns=COLUMNS)
             for record in records:
                 log_processed_invoice(record.get("Invoice No.", record.get("Invoice No", "")))
+                store_processed_invoice(record, DATABASE_PATH)
         except json.JSONDecodeError:
             st.error("Gemini returned invalid JSON. Please try processing again.")
         except Exception as error:

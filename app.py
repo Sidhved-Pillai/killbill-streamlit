@@ -18,6 +18,7 @@ from customer_master import (
     build_customer_lookup,
     load_customer_master,
 )
+from excel_export import build_excel_workbook, excel_export_filename
 from freight_master import apply_freight_lookup, build_freight_lookup, normalize_loading_point
 
 try:
@@ -211,8 +212,7 @@ PREMIUM_CSS = """
         border-color: rgba(17, 17, 17, 0.08) !important;
     }
 
-    [data-testid="stDataFrame"] th,
-    [data-testid="stDataEditor"] th {
+    [data-testid="stDataFrame"] th {
         background: #e8eaed !important;
         color: #111111 !important;
     }
@@ -229,9 +229,15 @@ PREMIUM_CSS = """
 
     div[data-testid="stDownloadButton"] > button,
     [data-testid="stDownloadButton"] button {
-        background: #D32F2F !important;
+        background: #2E7D32 !important;
         color: #FFFFFF !important;
-        border: 1px solid #D32F2F !important;
+        border: 1px solid #2E7D32 !important;
+        border-radius: 8px !important;
+    }
+
+    div[data-testid="stDownloadButton"] > button *,
+    [data-testid="stDownloadButton"] button * {
+        color: #FFFFFF !important;
     }
 
     .section-label {
@@ -701,8 +707,8 @@ if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
     st.session_state["bill_data"] = edited_df
 
     st.download_button(
-        label="Download CSV",
-        data=edited_df.to_csv(index=False).encode("utf-8"),
-        mime="text/csv",
-        file_name="bisleri_billing_data.csv",
+        label="Download Excel",
+        data=build_excel_workbook(edited_df),
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        file_name=excel_export_filename(),
     )

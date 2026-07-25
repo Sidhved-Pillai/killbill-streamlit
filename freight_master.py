@@ -30,6 +30,11 @@ LOADING_POINTS = (
     "Kamshet",
 )
 
+APPROVED_ROUNDED_FREIGHT_CHARGES = frozenset(
+    {3844, 4509, 5073, 6509, 8748, 10160}
+)
+DELIVERY_CHALLAN_FREIGHT_CHARGE = 4327
+
 
 def normalize_loading_point(value):
     """Return a known loading point, or ``None`` when the value is ambiguous."""
@@ -103,6 +108,16 @@ def _distance_matches_slab(distance, slab):
     return lower <= float(distance) <= upper
 
 
+def round_freight_charge(value):
+    """Round standard master rates while leaving unrelated special rates intact."""
+    if not _is_valid_number(value):
+        return value
+    rounded_value = int(round(float(value)))
+    if rounded_value in APPROVED_ROUNDED_FREIGHT_CHARGES:
+        return rounded_value
+    return value
+
+
 def build_freight_lookup(master_data):
     """Build ``customer code -> loading point -> freight charge`` from the matrix.
 
@@ -149,10 +164,19 @@ def apply_freight_lookup(records, freight_lookup):
     for record in records:
         enriched_record = record.copy()
         enriched_record["Freight Charge"] = ""
+        invoice_number = str(
+            enriched_record.get(
+                "Invoice No.",
+                enriched_record.get("Invoice No", ""),
+            )
+            or ""
+        ).strip().upper()
         customer_code = normalize_customer_code(enriched_record.get("Customer Code"))
         loading_point = normalize_loading_point(enriched_record.get("Loading Point"))
 
-        if customer_code not in freight_lookup:
+        if invoice_number.startswith("TON"):
+            enriched_record["Freight Charge"] = DELIVERY_CHALLAN_FREIGHT_CHARGE
+        elif customer_code not in freight_lookup:
             LOGGER.info("Freight lookup skipped for %s: customer not found", customer_code)
         elif not loading_point:
             LOGGER.info("Freight lookup skipped for %s: loading point not found", customer_code)
@@ -165,7 +189,7 @@ def apply_freight_lookup(records, freight_lookup):
                     loading_point,
                 )
             else:
-                enriched_record["Freight Charge"] = charge
+                enriched_record["Freight Charge"] = round_freight_charge(charge)
 
         # Loading Point is extraction metadata and must never reach the UI/CSV.
         enriched_record.pop("Loading Point", None)

@@ -1,6 +1,13 @@
+import unittest
+
 import pandas as pd
 
-from freight_master import apply_freight_lookup, build_freight_lookup
+from freight_master import (
+    apply_freight_lookup,
+    build_freight_lookup,
+    normalize_loading_point,
+    short_origin,
+)
 
 
 def freight_master_frame(distance=22):
@@ -58,3 +65,27 @@ def test_workbook_lookup_uses_the_loading_points_distance_triplet():
     lookup = build_freight_lookup(freight_master_frame())
 
     assert lookup["MUMC001"]["Thane"] == 4508.64
+
+
+class OriginNormalizationTests(unittest.TestCase):
+    def test_bhiwandi_yewai_warehouse_is_not_confused_with_thane_district(self):
+        address = (
+            "RK LOGI WORLD COMPOUND WAREHOUSE NO - F1, VILLAGE YEWAI, "
+            "NEAR KHODIYAAR TEMPLE, TAL. BHIWANDI-YEWAI, BHIWANDI, "
+            "DIST THANE, THANE 421302"
+        )
+
+        self.assertEqual(normalize_loading_point(address), "Bhiwandi")
+        self.assertEqual(short_origin(address), "Bhiwandi")
+
+    def test_normalized_loading_point_replaces_full_from_address(self):
+        self.assertEqual(
+            short_origin("Complete warehouse address", "Bhiwandi"),
+            "Bhiwandi",
+        )
+
+    def test_unknown_from_value_is_preserved(self):
+        self.assertEqual(
+            short_origin("Unrecognized warehouse"),
+            "Unrecognized warehouse",
+        )

@@ -54,10 +54,23 @@ def normalize_loading_point(value):
     if exact_match:
         return exact_match
 
+    # The Bhiwandi warehouse address also contains "Thane" as its district,
+    # which would otherwise make the location appear ambiguous.
+    if "RKLOGIWORLD" in normalized or "YEWAI" in normalized:
+        return "Bhiwandi"
+
     # Gemini may preserve supporting source text such as "Thane Depot".  Accept
     # that only when it contains one, and exactly one, known depot identifier.
     matches = {point for alias, point in aliases.items() if alias in normalized}
     return matches.pop() if len(matches) == 1 else None
+
+
+def short_origin(from_value, loading_point=None):
+    """Prefer the normalized extraction origin while preserving unknown values."""
+    normalized_origin = normalize_loading_point(loading_point)
+    if normalized_origin is None:
+        normalized_origin = normalize_loading_point(from_value)
+    return normalized_origin or from_value
 
 
 def _normalise_header(value):

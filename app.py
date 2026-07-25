@@ -19,7 +19,12 @@ from customer_master import (
     load_customer_master,
 )
 from excel_export import build_excel_workbook, excel_export_filename
-from freight_master import apply_freight_lookup, build_freight_lookup, normalize_loading_point
+from freight_master import (
+    apply_freight_lookup,
+    build_freight_lookup,
+    normalize_loading_point,
+    short_origin,
+)
 from invoice_history import (
     get_processed_invoice,
     init_invoice_history_database,
@@ -441,12 +446,14 @@ def apply_case_jar_logic(record):
     else:
         customer_code = str(customer_code).strip().upper().replace(" ", "")
 
+    loading_point = normalize_loading_point(record.get("Loading Point"))
+
     return {
         "Date": record.get("Date", ""),
         "Invoice No.": record.get("Invoice No.", record.get("Invoice No", "")),
         "Vehicle No.": record.get("Vehicle No.", record.get("Vehicle No", "")),
-        "From": record.get("From", ""),
-        "Loading Point": normalize_loading_point(record.get("Loading Point")),
+        "From": short_origin(record.get("From", ""), loading_point),
+        "Loading Point": loading_point,
         "Customer Code": customer_code,
         "Customer Name": record.get("Customer Name", ""),
         "To": record.get("To", ""),

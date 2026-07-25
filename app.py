@@ -32,6 +32,12 @@ from invoice_history import (
     store_new_invoice_records,
     store_processed_invoice,
 )
+from billing_statement import (
+    SUMMARY_COLUMNS,
+    billing_statement_filename,
+    build_billing_statement,
+    build_billing_statement_workbook,
+)
 
 try:
     streamlit_api_key = st.secrets.get("GOOGLE_API_KEY", "")
@@ -951,3 +957,21 @@ if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         file_name=excel_export_filename(),
     )
+
+    st.subheader("Billing Statement")
+    billing_statement = build_billing_statement(edited_df)
+    if billing_statement.empty:
+        st.caption("No invoice entries are available for the billing statement.")
+    else:
+        st.dataframe(
+            billing_statement[SUMMARY_COLUMNS],
+            use_container_width=True,
+            hide_index=True,
+            height=360,
+        )
+        st.download_button(
+            label="Download Billing Statement",
+            data=build_billing_statement_workbook(billing_statement),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            file_name=billing_statement_filename(billing_statement),
+        )

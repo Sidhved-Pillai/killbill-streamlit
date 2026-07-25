@@ -69,16 +69,43 @@ def _sqlite_value(value):
     return value
 
 
-def store_processed_invoice(
-    record,
+def _invoice_number_from_record(record):
+    value = record.get("Invoice No.", record.get("Invoice No", ""))
+    return str(value or "").strip()
+
+
+def find_processed_invoice_by_number(
+    invoice_number,
     database_path=DEFAULT_DATABASE_PATH,
-    processed_at=None,
 ):
-    """Append one successfully processed invoice and return its history ID."""
-    processed_timestamp = (processed_at or datetime.now()).isoformat(timespec="seconds")
+    """Return the most recent history event for an exact invoice number."""
+    normalized_invoice_number = str(invoice_number or "").strip()
+    if not normalized_invoice_number:
+        return None
+
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT
+                id,
+                processed_timestamp,
+                invoice_number,
+                customer_name
+            FROM processed_invoice_history
+            WHERE invoice_number = ?
+            ORDER BY processed_timestamp DESC, id DESC
+            LIMIT 1
+            """,
+            (normalized_invoice_number,),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _insert_processed_invoice(connection, record, processed_timestamp):
     values = (
         record.get("Date", ""),
-        record.get("Invoice No.", record.get("Invoice No", "")),
+        _invoice_number_from_record(record),
         record.get("Vehicle No.", record.get("Vehicle No", "")),
         record.get("From", ""),
         record.get("Customer Code", ""),
@@ -90,30 +117,100 @@ def store_processed_invoice(
         record.get("Freight Charge", ""),
         record.get("Lookup Status", ""),
     )
+    cursor = connection.execute(
+        """
+        INSERT INTO processed_invoice_history (
+            processed_timestamp,
+            invoice_date,
+            invoice_number,
+            vehicle_number,
+            origin,
+            customer_code,
+            customer_name,
+            destination,
+            vehicle_type,
+            cases,
+            jars,
+            freight_charge,
+            lookup_status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (processed_timestamp, *(_sqlite_value(value) for value in values)),
+    )
+    return cursor.lastrowid
+
+
+def store_processed_invoice(
+    record,
+    database_path=DEFAULT_DATABASE_PATH,
+    processed_at=None,
+):
+    """Append one successfully processed invoice and return its history ID."""
+    processed_timestamp = (processed_at or datetime.now()).isoformat(timespec="seconds")
 
     with sqlite3.connect(database_path) as connection:
-        cursor = connection.execute(
-            """
-            INSERT INTO processed_invoice_history (
-                processed_timestamp,
-                invoice_date,
+        return _insert_processed_invoice(connection, record, processed_timestamp)
+
+
+def store_processed_invoice_if_new(
+    record,
+    database_path=DEFAULT_DATABASE_PATH,
+    processed_at=None,
+):
+    """Atomically append an invoice unless its invoice number is already stored.
+
+    Returns ``(history_id, None)`` when inserted, or ``(None, existing_record)``
+    when skipped. Records without an invoice number are stored normally because
+    they cannot be identified as duplicates.
+    """
+    processed_timestamp = (processed_at or datetime.now()).isoformat(timespec="seconds")
+    invoice_number = _invoice_number_from_record(record)
+
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("BEGIN IMMEDIATE")
+        existing = None
+        if invoice_number:
+            existing = connection.execute(
+                """
+                SELECT
+                    id,
+                    processed_timestamp,
+                    invoice_number,
+                    customer_name
+                FROM processed_invoice_history
+                WHERE invoice_number = ?
+                ORDER BY processed_timestamp DESC, id DESC
+                LIMIT 1
+                """,
+                (invoice_number,),
+            ).fetchone()
+
+        if existing is not None:
+            return None, dict(existing)
+
+        history_id = _insert_processed_invoice(connection, record, processed_timestamp)
+        return history_id, None
+
+
+def store_new_invoice_records(records, database_path=DEFAULT_DATABASE_PATH):
+    """Store a batch and separate accepted records from skipped invoice numbers."""
+    accepted_records = []
+    duplicates_by_invoice = {}
+
+    for record in records:
+        history_id, existing = store_processed_invoice_if_new(record, database_path)
+        invoice_number = _invoice_number_from_record(record)
+        if history_id is None:
+            duplicates_by_invoice.setdefault(
                 invoice_number,
-                vehicle_number,
-                origin,
-                customer_code,
-                customer_name,
-                destination,
-                vehicle_type,
-                cases,
-                jars,
-                freight_charge,
-                lookup_status
+                {"record": record, "previous": existing},
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (processed_timestamp, *(_sqlite_value(value) for value in values)),
-        )
-        return cursor.lastrowid
+            continue
+        accepted_records.append(record)
+
+    return accepted_records, list(duplicates_by_invoice.values())
 
 
 def search_processed_invoices(query="", database_path=DEFAULT_DATABASE_PATH):

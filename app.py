@@ -24,6 +24,7 @@ from invoice_history import (
     get_processed_invoice,
     init_invoice_history_database,
     search_processed_invoices,
+    store_new_invoice_records,
     store_processed_invoice,
 )
 
@@ -281,6 +282,24 @@ PREMIUM_CSS = """
 
     div[data-testid="stNotification"] * {
         color: #FFFFFF !important;
+    }
+
+    div[data-testid="stDialog"] button[kind="tertiary"] {
+        background: transparent !important;
+        color: #D32F2F !important;
+        border: 0 !important;
+        box-shadow: none !important;
+        padding: 0.25rem 0 !important;
+        white-space: nowrap;
+    }
+
+    div[data-testid="stDialog"] button[kind="tertiary"]:hover {
+        background: transparent !important;
+        color: #B71C1C !important;
+        border: 0 !important;
+        box-shadow: none !important;
+        transform: none;
+        text-decoration: underline;
     }
 </style>
 """
@@ -545,26 +564,44 @@ def analyze_bills(uploaded_files):
 def init_database():
     """Create the lightweight invoice-processing history store when needed."""
     with sqlite3.connect(DATABASE_PATH) as connection:
+        existing_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(billing_history)").fetchall()
+        }
+        if existing_columns and "id" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE billing_history RENAME TO billing_history_legacy"
+            )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS billing_history (
-                invoice_no TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                invoice_no TEXT NOT NULL,
                 processed_timestamp TEXT NOT NULL
             )
             """
         )
+        if existing_columns and "id" not in existing_columns:
+            connection.execute(
+                """
+                INSERT INTO billing_history (invoice_no, processed_timestamp)
+                SELECT invoice_no, processed_timestamp
+                FROM billing_history_legacy
+                """
+            )
+            connection.execute("DROP TABLE billing_history_legacy")
 
 
-def log_processed_invoice(invoice_no):
-    """Record one successfully processed invoice, ignoring invoices already logged."""
+def log_processed_invoice(invoice_no, database_path=DATABASE_PATH):
+    """Record one successful processing event for dashboard reporting."""
     normalized_invoice_no = str(invoice_no or "").strip()
     if not normalized_invoice_no:
         return
 
-    with sqlite3.connect(DATABASE_PATH) as connection:
+    with sqlite3.connect(database_path) as connection:
         connection.execute(
             """
-            INSERT OR IGNORE INTO billing_history (invoice_no, processed_timestamp)
+            INSERT INTO billing_history (invoice_no, processed_timestamp)
             VALUES (?, ?)
             """,
             (normalized_invoice_no, datetime.now().isoformat(timespec="seconds")),
@@ -689,6 +726,76 @@ def render_processed_invoice_history(database_path):
             show_processed_invoice_dialog(selected_invoice)
 
 
+@st.dialog("Duplicate Invoices", width="large")
+def show_duplicate_invoice_dialog(database_path):
+    duplicates = st.session_state.get("duplicate_invoices", [])
+
+    header_columns = st.columns([1.5, 2.2, 1.7, 1.2])
+    for column, label in zip(
+        header_columns,
+        (
+            "Invoice Number",
+            "Customer Name",
+            "Previously Processed On",
+            "Action",
+        ),
+    ):
+        column.markdown(f"**{label}**")
+
+    for index, duplicate in enumerate(duplicates):
+        record = duplicate["record"]
+        previous = duplicate["previous"]
+        columns = st.columns([1.5, 2.2, 1.7, 1.2])
+        columns[0].write(record.get("Invoice No.", record.get("Invoice No", "")))
+        columns[1].write(record.get("Customer Name", ""))
+        columns[2].write(format_processed_timestamp(previous["processed_timestamp"]))
+        if columns[3].button(
+            "Re-upload anyway",
+            key=f"reupload_duplicate_{index}",
+            type="tertiary",
+        ):
+            store_processed_invoice(record, database_path)
+            log_processed_invoice(
+                record.get("Invoice No.", record.get("Invoice No", "")),
+                database_path,
+            )
+            current_bill_data = st.session_state.get("bill_data")
+            reuploaded_data = pd.DataFrame([record], columns=COLUMNS)
+            if current_bill_data is None or current_bill_data.empty:
+                st.session_state["bill_data"] = reuploaded_data
+            else:
+                st.session_state["bill_data"] = pd.concat(
+                    [current_bill_data, reuploaded_data],
+                    ignore_index=True,
+                )
+            st.session_state["processing_new_count"] += 1
+            del st.session_state["duplicate_invoices"][index]
+            st.rerun()
+
+    if not duplicates:
+        st.caption("No skipped duplicate invoices remain.")
+
+    if st.button("Close", key="close_duplicate_invoice_dialog"):
+        st.session_state["show_duplicate_invoice_details"] = False
+        st.rerun()
+
+
+def render_processing_summary(database_path):
+    if "processing_new_count" not in st.session_state:
+        return
+
+    duplicate_count = len(st.session_state.get("duplicate_invoices", []))
+    st.markdown('<div class="section-label">Processing Complete</div>', unsafe_allow_html=True)
+    st.write(f"New invoices processed: {st.session_state['processing_new_count']}")
+    st.write(f"Duplicate invoices skipped: {duplicate_count}")
+
+    if duplicate_count and st.button("View Details", key="view_duplicate_invoice_details"):
+        st.session_state["show_duplicate_invoice_details"] = True
+
+    if st.session_state.get("show_duplicate_invoice_details", False):
+        show_duplicate_invoice_dialog(database_path)
+
+
 st.set_page_config(
     page_title="Project Kill Bill",
     page_icon="",
@@ -793,14 +900,31 @@ if st.button("Process Bills", disabled=not uploaded_files):
             customer_lookup = build_customer_lookup(master_data)
             records = apply_customer_master_lookup(records, customer_lookup)
             records = apply_freight_lookup(records, build_freight_lookup(master_data))
-            st.session_state["bill_data"] = pd.DataFrame(records, columns=COLUMNS)
-            for record in records:
-                log_processed_invoice(record.get("Invoice No.", record.get("Invoice No", "")))
-                store_processed_invoice(record, DATABASE_PATH)
+            accepted_records, duplicates = store_new_invoice_records(
+                records,
+                DATABASE_PATH,
+            )
+            for accepted_record in accepted_records:
+                log_processed_invoice(
+                    accepted_record.get(
+                        "Invoice No.",
+                        accepted_record.get("Invoice No", ""),
+                    ),
+                    DATABASE_PATH,
+                )
+            st.session_state["bill_data"] = pd.DataFrame(
+                accepted_records,
+                columns=COLUMNS,
+            )
+            st.session_state["processing_new_count"] = len(accepted_records)
+            st.session_state["duplicate_invoices"] = duplicates
+            st.session_state["show_duplicate_invoice_details"] = False
         except json.JSONDecodeError:
             st.error("Gemini returned invalid JSON. Please try processing again.")
         except Exception as error:
             st.error(f"Failed to process bills: {error}")
+
+render_processing_summary(DATABASE_PATH)
 
 if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
     st.subheader("Review & Edit Extracted Data")

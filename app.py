@@ -384,7 +384,7 @@ def extract_json_text(raw_text):
 
 def is_jar_item(description):
     normalized = str(description).upper()
-    return bool(re.search(r"(?<!\d)(?:10|20)[\s.\-]*LTR", normalized))
+    return bool(re.search(r"(?<!\d)20[\s.\-]*LTR", normalized))
 
 
 def parse_item_quantity(item):

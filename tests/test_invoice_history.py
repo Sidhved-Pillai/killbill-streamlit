@@ -7,6 +7,7 @@ from invoice_history import (
     count_processed_invoices,
     database_healthcheck,
     find_processed_invoice_by_number,
+    get_dashboard_counts,
     get_processed_invoice,
     init_invoice_history_database,
     prune_previous_months,
@@ -246,6 +247,30 @@ class ProcessedInvoiceHistoryTests(unittest.TestCase):
 
     def test_database_healthcheck(self):
         self.assertTrue(database_healthcheck(self.database_path))
+
+    def test_dashboard_counts_share_one_calendar_query(self):
+        for invoice_number, processed_at in (
+            ("MONTH", datetime(2026, 7, 2, 9, 0)),
+            ("WEEK", datetime(2026, 7, 27, 9, 0)),
+            ("TODAY-1", datetime(2026, 7, 28, 0, 0)),
+            ("TODAY-2", datetime(2026, 7, 28, 23, 59, 59)),
+            ("TOMORROW", datetime(2026, 7, 29, 0, 0)),
+        ):
+            store_processed_invoice(
+                {"Invoice No.": invoice_number},
+                self.database_path,
+                processed_at=processed_at,
+            )
+
+        counts = get_dashboard_counts(
+            date(2026, 7, 28),
+            self.database_path,
+        )
+
+        self.assertEqual(
+            counts,
+            {"today": 2, "week": 3, "month": 4},
+        )
 
 
 if __name__ == "__main__":

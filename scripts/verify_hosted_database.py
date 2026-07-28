@@ -11,6 +11,7 @@ from invoice_history import (  # noqa: E402
     count_processed_invoices,
     database_healthcheck,
     find_processed_invoice_by_number,
+    get_dashboard_counts,
     init_invoice_history_database,
     search_processed_invoices,
     store_processed_invoice_if_new,
@@ -46,6 +47,13 @@ def main():
             date(2026, 7, 28),
             database_url,
         ) >= 1
+        dashboard_counts = get_dashboard_counts(
+            date(2026, 7, 28),
+            database_url,
+        )
+        assert dashboard_counts["today"] >= 1
+        assert dashboard_counts["week"] >= dashboard_counts["today"]
+        assert dashboard_counts["month"] >= dashboard_counts["week"]
 
         duplicate_id, duplicate = store_processed_invoice_if_new(
             {"Invoice No.": invoice_number},

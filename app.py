@@ -3,7 +3,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pandas as pd
 import pypdf
@@ -26,7 +26,7 @@ from freight_master import (
 )
 from invoice_history import (
     count_processed_invoices,
-    database_healthcheck,
+    get_dashboard_counts,
     get_processed_invoice,
     init_invoice_history_database,
     local_today,
@@ -589,19 +589,20 @@ def _get_processed_count(start_date, end_date):
     return count_processed_invoices(start_date, end_date, DATABASE_TARGET)
 
 
-def get_today_count():
-    today = local_today()
-    return _get_processed_count(today, today)
+@st.cache_resource(show_spinner=False)
+def initialize_history_store(database_target):
+    init_invoice_history_database(database_target)
+    return True
 
 
-def get_week_count():
-    today = local_today()
-    return _get_processed_count(today - timedelta(days=today.weekday()), today)
+@st.cache_data(ttl=3600, show_spinner=False)
+def maintain_monthly_history(database_target, month_start):
+    return prune_previous_months(database_target, today=month_start)
 
 
-def get_month_count():
-    today = local_today()
-    return _get_processed_count(today.replace(day=1), today)
+@st.cache_data(ttl=15, show_spinner=False)
+def load_dashboard_counts(database_target, today):
+    return get_dashboard_counts(today, database_target)
 
 
 def get_custom_count(start_date, end_date):
@@ -725,6 +726,7 @@ def show_duplicate_invoice_dialog(database_path):
             type="tertiary",
         ):
             store_processed_invoice(record, database_path)
+            load_dashboard_counts.clear()
             current_bill_data = st.session_state.get("bill_data")
             reuploaded_data = pd.DataFrame([record], columns=COLUMNS)
             if current_bill_data is None or current_bill_data.empty:
@@ -780,16 +782,20 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-init_invoice_history_database(DATABASE_TARGET)
-database_healthcheck(DATABASE_TARGET)
-prune_previous_months(DATABASE_TARGET)
+dashboard_today = local_today()
+initialize_history_store(DATABASE_TARGET)
+maintain_monthly_history(
+    DATABASE_TARGET,
+    dashboard_today.replace(day=1),
+)
+dashboard_counts = load_dashboard_counts(DATABASE_TARGET, dashboard_today)
 
 st.markdown('<div class="section-label">Billing Dashboard</div>', unsafe_allow_html=True)
 today_column, week_column, month_column = st.columns(3)
 for column, label, value in (
-    (today_column, "Today's Bills", get_today_count()),
-    (week_column, "This Week", get_week_count()),
-    (month_column, "This Month", get_month_count()),
+    (today_column, "Today's Bills", dashboard_counts["today"]),
+    (week_column, "This Week", dashboard_counts["week"]),
+    (month_column, "This Month", dashboard_counts["month"]),
 ):
     with column:
         st.markdown(
@@ -871,6 +877,8 @@ if st.button("Process Bills", disabled=not uploaded_files):
                 records,
                 DATABASE_TARGET,
             )
+            if accepted_records:
+                load_dashboard_counts.clear()
             st.session_state["bill_data"] = pd.DataFrame(
                 accepted_records,
                 columns=COLUMNS,

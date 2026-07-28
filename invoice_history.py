@@ -374,6 +374,56 @@ def count_processed_invoices(
     return row["invoice_count"]
 
 
+def get_dashboard_counts(today, database_target=DEFAULT_DATABASE_PATH):
+    """Return today's, current week's, and current month's counts in one query."""
+    tomorrow = today + timedelta(days=1)
+    week_start = today - timedelta(days=today.weekday())
+    month_start = today.replace(day=1)
+    placeholder = _placeholder(database_target)
+    with _connection(database_target) as connection:
+        row = _execute(
+            connection,
+            f"""
+            SELECT
+                SUM(
+                    CASE
+                        WHEN processed_timestamp >= {placeholder}
+                         AND processed_timestamp < {placeholder}
+                        THEN 1 ELSE 0
+                    END
+                ) AS today_count,
+                SUM(
+                    CASE
+                        WHEN processed_timestamp >= {placeholder}
+                         AND processed_timestamp < {placeholder}
+                        THEN 1 ELSE 0
+                    END
+                ) AS week_count,
+                SUM(
+                    CASE
+                        WHEN processed_timestamp >= {placeholder}
+                         AND processed_timestamp < {placeholder}
+                        THEN 1 ELSE 0
+                    END
+                ) AS month_count
+            FROM processed_invoice_history
+            """,
+            (
+                datetime.combine(today, datetime.min.time()),
+                datetime.combine(tomorrow, datetime.min.time()),
+                datetime.combine(week_start, datetime.min.time()),
+                datetime.combine(tomorrow, datetime.min.time()),
+                datetime.combine(month_start, datetime.min.time()),
+                datetime.combine(tomorrow, datetime.min.time()),
+            ),
+        ).fetchone()
+    return {
+        "today": int(row["today_count"] or 0),
+        "week": int(row["week_count"] or 0),
+        "month": int(row["month_count"] or 0),
+    }
+
+
 def prune_previous_months(database_target=DEFAULT_DATABASE_PATH, today=None):
     current_date = today or local_today()
     month_start = datetime.combine(current_date.replace(day=1), datetime.min.time())

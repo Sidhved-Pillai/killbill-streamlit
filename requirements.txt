@@ -4,4 +4,3 @@ pandas
 Pillow
 pypdf
 openpyxl
-psycopg[binary]==3.2.9

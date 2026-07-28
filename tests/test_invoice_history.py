@@ -1,12 +1,15 @@
 import os
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 
 from invoice_history import (
+    count_processed_invoices,
+    database_healthcheck,
     find_processed_invoice_by_number,
     get_processed_invoice,
     init_invoice_history_database,
+    prune_previous_months,
     search_processed_invoices,
     store_new_invoice_records,
     store_processed_invoice,
@@ -195,6 +198,54 @@ class ProcessedInvoiceHistoryTests(unittest.TestCase):
         self.assertEqual(accepted[0]["Case"], 550)
         self.assertEqual(len(duplicates), 1)
         self.assertEqual(duplicates[0]["record"]["Invoice No."], "NEW-002")
+
+    def test_dashboard_count_uses_detailed_history_and_inclusive_dates(self):
+        for invoice_number, processed_at in (
+            ("BEFORE", datetime(2026, 6, 30, 23, 59, 59)),
+            ("START", datetime(2026, 7, 1, 0, 0, 0)),
+            ("END", datetime(2026, 7, 31, 23, 59, 59)),
+            ("AFTER", datetime(2026, 8, 1, 0, 0, 0)),
+        ):
+            store_processed_invoice(
+                {"Invoice No.": invoice_number},
+                self.database_path,
+                processed_at=processed_at,
+            )
+
+        self.assertEqual(
+            count_processed_invoices(
+                date(2026, 7, 1),
+                date(2026, 7, 31),
+                self.database_path,
+            ),
+            2,
+        )
+
+    def test_monthly_cleanup_removes_only_previous_months(self):
+        store_processed_invoice(
+            {"Invoice No.": "OLD"},
+            self.database_path,
+            processed_at=datetime(2026, 6, 30, 23, 59, 59),
+        )
+        store_processed_invoice(
+            {"Invoice No.": "CURRENT"},
+            self.database_path,
+            processed_at=datetime(2026, 7, 1, 0, 0, 0),
+        )
+
+        removed = prune_previous_months(
+            self.database_path,
+            today=date(2026, 7, 28),
+        )
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(
+            [row["invoice_number"] for row in search_processed_invoices("", self.database_path)],
+            ["CURRENT"],
+        )
+
+    def test_database_healthcheck(self):
+        self.assertTrue(database_healthcheck(self.database_path))
 
 
 if __name__ == "__main__":

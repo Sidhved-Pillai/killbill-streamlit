@@ -1,12 +1,15 @@
 import os
+import sqlite3
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 
 from invoice_history import (
+    count_processed_invoices,
     find_processed_invoice_by_number,
     get_processed_invoice,
     init_invoice_history_database,
+    prune_processed_invoice_history,
     search_processed_invoices,
     store_new_invoice_records,
     store_processed_invoice,
@@ -195,6 +198,101 @@ class ProcessedInvoiceHistoryTests(unittest.TestCase):
         self.assertEqual(accepted[0]["Case"], 550)
         self.assertEqual(len(duplicates), 1)
         self.assertEqual(duplicates[0]["record"]["Invoice No."], "NEW-002")
+
+    def test_counts_use_inclusive_calendar_date_boundaries(self):
+        for invoice_number, processed_at in (
+            ("BEFORE", datetime(2026, 6, 30, 23, 59, 59)),
+            ("START", datetime(2026, 7, 1, 0, 0, 0)),
+            ("MIDDLE", datetime(2026, 7, 15, 12, 30, 0)),
+            ("END", datetime(2026, 7, 31, 23, 59, 59)),
+            ("AFTER", datetime(2026, 8, 1, 0, 0, 0)),
+        ):
+            store_processed_invoice(
+                {"Invoice No.": invoice_number},
+                self.database_path,
+                processed_at=processed_at,
+            )
+
+        count = count_processed_invoices(
+            date(2026, 7, 1),
+            date(2026, 7, 31),
+            self.database_path,
+        )
+
+        self.assertEqual(count, 3)
+
+    def test_invalid_count_range_returns_zero(self):
+        self.assertEqual(
+            count_processed_invoices(
+                date(2026, 7, 2),
+                date(2026, 7, 1),
+                self.database_path,
+            ),
+            0,
+        )
+
+    def test_monthly_cleanup_removes_only_prior_months(self):
+        for invoice_number, processed_at in (
+            ("JUNE", datetime(2026, 6, 30, 23, 59, 59)),
+            ("JULY-START", datetime(2026, 7, 1, 0, 0, 0)),
+            ("JULY-LATEST", datetime(2026, 7, 28, 18, 0, 0)),
+        ):
+            store_processed_invoice(
+                {"Invoice No.": invoice_number},
+                self.database_path,
+                processed_at=processed_at,
+            )
+
+        removed_history, removed_dashboard = prune_processed_invoice_history(
+            self.database_path,
+            today=date(2026, 7, 28),
+        )
+
+        self.assertEqual(removed_history, 1)
+        self.assertEqual(removed_dashboard, 0)
+        self.assertEqual(len(search_processed_invoices("", self.database_path)), 2)
+        self.assertEqual(
+            count_processed_invoices(
+                date(2026, 7, 1),
+                date(2026, 7, 31),
+                self.database_path,
+            ),
+            2,
+        )
+
+    def test_monthly_cleanup_also_prunes_legacy_dashboard_rows(self):
+        with sqlite3.connect(self.database_path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE billing_history (
+                    id INTEGER PRIMARY KEY,
+                    invoice_no TEXT NOT NULL,
+                    processed_timestamp TEXT NOT NULL
+                )
+                """
+            )
+            connection.executemany(
+                """
+                INSERT INTO billing_history (invoice_no, processed_timestamp)
+                VALUES (?, ?)
+                """,
+                (
+                    ("OLD", "2026-06-30T23:59:59"),
+                    ("CURRENT", "2026-07-01T00:00:00"),
+                ),
+            )
+
+        _, removed_dashboard = prune_processed_invoice_history(
+            self.database_path,
+            today=date(2026, 7, 28),
+        )
+
+        with sqlite3.connect(self.database_path) as connection:
+            remaining = connection.execute(
+                "SELECT invoice_no FROM billing_history"
+            ).fetchall()
+        self.assertEqual(removed_dashboard, 1)
+        self.assertEqual(remaining, [("CURRENT",)])
 
 
 if __name__ == "__main__":

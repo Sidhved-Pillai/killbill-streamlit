@@ -4,7 +4,7 @@ import os
 import re
 import sqlite3
 import time
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import pandas as pd
 import pypdf
@@ -26,8 +26,11 @@ from freight_master import (
     short_origin,
 )
 from invoice_history import (
+    count_processed_invoices,
     get_processed_invoice,
     init_invoice_history_database,
+    local_today,
+    prune_processed_invoice_history,
     search_processed_invoices,
     store_new_invoice_records,
     store_processed_invoice,
@@ -622,30 +625,21 @@ def log_processed_invoice(invoice_no, database_path=DATABASE_PATH):
 
 
 def _get_processed_count(start_date, end_date):
-    with sqlite3.connect(DATABASE_PATH) as connection:
-        result = connection.execute(
-            """
-            SELECT COUNT(*)
-            FROM billing_history
-            WHERE DATE(processed_timestamp) BETWEEN ? AND ?
-            """,
-            (start_date.isoformat(), end_date.isoformat()),
-        ).fetchone()
-    return result[0]
+    return count_processed_invoices(start_date, end_date, DATABASE_PATH)
 
 
 def get_today_count():
-    today = date.today()
+    today = local_today()
     return _get_processed_count(today, today)
 
 
 def get_week_count():
-    today = date.today()
+    today = local_today()
     return _get_processed_count(today - timedelta(days=today.weekday()), today)
 
 
 def get_month_count():
-    today = date.today()
+    today = local_today()
     return _get_processed_count(today.replace(day=1), today)
 
 
@@ -829,6 +823,7 @@ st.markdown(
 
 init_database()
 init_invoice_history_database(DATABASE_PATH)
+prune_processed_invoice_history(DATABASE_PATH)
 
 st.markdown('<div class="section-label">Billing Dashboard</div>', unsafe_allow_html=True)
 today_column, week_column, month_column = st.columns(3)
@@ -862,9 +857,9 @@ if st.session_state.get("show_processed_invoice_history", False):
 st.markdown('<div class="section-label">Custom Report</div>', unsafe_allow_html=True)
 from_column, to_column, generate_column = st.columns([1, 1, 0.7])
 with from_column:
-    start_date = st.date_input("From Date", value=date.today(), key="custom_report_start")
+    start_date = st.date_input("From Date", value=local_today(), key="custom_report_start")
 with to_column:
-    end_date = st.date_input("To Date", value=date.today(), key="custom_report_end")
+    end_date = st.date_input("To Date", value=local_today(), key="custom_report_end")
 with generate_column:
     st.write("")
     generate_report = st.button("Generate", key="generate_custom_report")
@@ -917,14 +912,6 @@ if st.button("Process Bills", disabled=not uploaded_files):
                 records,
                 DATABASE_PATH,
             )
-            for accepted_record in accepted_records:
-                log_processed_invoice(
-                    accepted_record.get(
-                        "Invoice No.",
-                        accepted_record.get("Invoice No", ""),
-                    ),
-                    DATABASE_PATH,
-                )
             st.session_state["bill_data"] = pd.DataFrame(
                 accepted_records,
                 columns=COLUMNS,

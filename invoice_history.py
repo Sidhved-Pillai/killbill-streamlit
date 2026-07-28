@@ -1,12 +1,14 @@
 import os
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 
 DEFAULT_DATABASE_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "billing_history.db",
 )
+APP_TIMEZONE = ZoneInfo("Asia/Kolkata")
 
 HISTORY_COLUMNS = (
     "invoice_date",
@@ -72,6 +74,15 @@ def _sqlite_value(value):
 def _invoice_number_from_record(record):
     value = record.get("Invoice No.", record.get("Invoice No", ""))
     return str(value or "").strip()
+
+
+def local_now():
+    """Return the app's local wall-clock time for stable reporting boundaries."""
+    return datetime.now(APP_TIMEZONE).replace(tzinfo=None)
+
+
+def local_today():
+    return local_now().date()
 
 
 def find_processed_invoice_by_number(
@@ -147,7 +158,7 @@ def store_processed_invoice(
     processed_at=None,
 ):
     """Append one successfully processed invoice and return its history ID."""
-    processed_timestamp = (processed_at or datetime.now()).isoformat(timespec="seconds")
+    processed_timestamp = (processed_at or local_now()).isoformat(timespec="seconds")
 
     with sqlite3.connect(database_path) as connection:
         return _insert_processed_invoice(connection, record, processed_timestamp)
@@ -164,7 +175,7 @@ def store_processed_invoice_if_new(
     when skipped. Records without an invoice number are stored normally because
     they cannot be identified as duplicates.
     """
-    processed_timestamp = (processed_at or datetime.now()).isoformat(timespec="seconds")
+    processed_timestamp = (processed_at or local_now()).isoformat(timespec="seconds")
     invoice_number = _invoice_number_from_record(record)
 
     with sqlite3.connect(database_path) as connection:
@@ -234,6 +245,74 @@ def search_processed_invoices(query="", database_path=DEFAULT_DATABASE_PATH):
             (search_term, search_term),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def count_processed_invoices(
+    start_date,
+    end_date,
+    database_path=DEFAULT_DATABASE_PATH,
+):
+    """Count detailed history rows processed within an inclusive date range."""
+    if start_date > end_date:
+        return 0
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM processed_invoice_history
+            WHERE processed_timestamp >= ?
+              AND processed_timestamp < ?
+            """,
+            (
+                datetime.combine(start_date, datetime.min.time()).isoformat(),
+                datetime.combine(
+                    end_date + timedelta(days=1),
+                    datetime.min.time(),
+                ).isoformat(),
+            ),
+        ).fetchone()
+    return row[0]
+
+
+def prune_processed_invoice_history(
+    database_path=DEFAULT_DATABASE_PATH,
+    today=None,
+):
+    """Remove reporting data from months before the current local month."""
+    current_date = today or local_today()
+    month_start = current_date.replace(day=1)
+    cutoff = datetime.combine(month_start, datetime.min.time()).isoformat()
+
+    with sqlite3.connect(database_path) as connection:
+        cursor = connection.execute(
+            """
+            DELETE FROM processed_invoice_history
+            WHERE processed_timestamp < ?
+            """,
+            (cutoff,),
+        )
+        removed_history_rows = cursor.rowcount
+
+        has_dashboard_table = connection.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'billing_history'
+            """
+        ).fetchone()
+        removed_dashboard_rows = 0
+        if has_dashboard_table is not None:
+            cursor = connection.execute(
+                """
+                DELETE FROM billing_history
+                WHERE processed_timestamp < ?
+                """,
+                (cutoff,),
+            )
+            removed_dashboard_rows = cursor.rowcount
+
+    return removed_history_rows, removed_dashboard_rows
 
 
 def get_processed_invoice(history_id, database_path=DEFAULT_DATABASE_PATH):

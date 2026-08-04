@@ -743,6 +743,38 @@ def render_processed_invoice_history(database_path):
 def show_duplicate_invoice_dialog(database_path):
     duplicates = st.session_state.get("duplicate_invoices", [])
 
+    if duplicates:
+        _, reupload_all_column = st.columns([4.8, 1.2])
+        if reupload_all_column.button(
+            "Re-Upload All",
+            key="reupload_all_duplicates",
+            type="primary",
+        ):
+            records = [duplicate["record"] for duplicate in duplicates]
+            for record in records:
+                store_processed_invoice(record, database_path)
+                log_processed_invoice(
+                    record.get("Invoice No.", record.get("Invoice No", "")),
+                    database_path,
+                )
+
+            reuploaded_data = pd.DataFrame(records, columns=COLUMNS)
+            current_bill_data = st.session_state.get("bill_data")
+            if current_bill_data is None or current_bill_data.empty:
+                st.session_state["bill_data"] = reuploaded_data
+            else:
+                st.session_state["bill_data"] = pd.concat(
+                    [current_bill_data, reuploaded_data],
+                    ignore_index=True,
+                )
+
+            st.session_state["processing_new_count"] = (
+                st.session_state.get("processing_new_count", 0) + len(records)
+            )
+            st.session_state["duplicate_invoices"] = []
+            st.session_state["show_duplicate_invoice_details"] = False
+            st.rerun()
+
     header_columns = st.columns([1.5, 2.2, 1.7, 1.2])
     for column, label in zip(
         header_columns,

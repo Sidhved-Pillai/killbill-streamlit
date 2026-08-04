@@ -25,13 +25,7 @@ from freight_master import (
     short_origin,
 )
 from invoice_history import (
-    count_processed_invoices,
-    get_dashboard_counts,
-    get_processed_invoice,
     init_invoice_history_database,
-    local_today,
-    prune_previous_months,
-    search_processed_invoices,
     store_new_invoice_records,
     store_processed_invoice,
 )
@@ -57,15 +51,7 @@ MODEL_FALLBACKS = [
 ]
 MAX_RETRIES = 5
 INITIAL_BACKOFF_SECONDS = 4
-LOCAL_DATABASE_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "billing_history.db",
-)
-try:
-    hosted_database_url = st.secrets.get("DATABASE_URL", "")
-except st.errors.StreamlitSecretNotFoundError:
-    hosted_database_url = ""
-DATABASE_TARGET = hosted_database_url or LOCAL_DATABASE_PATH
+DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "billing_history.db")
 
 PREMIUM_CSS = """
 <style>
@@ -585,116 +571,11 @@ def analyze_bills(uploaded_files):
     return []
 
 
-def _get_processed_count(start_date, end_date):
-    return count_processed_invoices(start_date, end_date, DATABASE_TARGET)
-
-
-@st.cache_resource(show_spinner=False)
-def initialize_history_store(database_target):
-    init_invoice_history_database(database_target)
-    return True
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def maintain_monthly_history(database_target, month_start):
-    return prune_previous_months(database_target, today=month_start)
-
-
-@st.cache_data(ttl=15, show_spinner=False)
-def load_dashboard_counts(database_target, today):
-    return get_dashboard_counts(today, database_target)
-
-
-def get_custom_count(start_date, end_date):
-    if start_date > end_date:
-        return 0
-    return _get_processed_count(start_date, end_date)
-
-
 def format_processed_timestamp(timestamp):
-    if isinstance(timestamp, datetime):
-        return timestamp.strftime("%d-%b-%Y %I:%M %p")
     try:
         return datetime.fromisoformat(timestamp).strftime("%d-%b-%Y %I:%M %p")
     except (TypeError, ValueError):
         return str(timestamp or "")
-
-
-def format_history_freight_charge(value):
-    if value in (None, ""):
-        return ""
-    try:
-        return f"₹ {float(value):,.2f}"
-    except (TypeError, ValueError):
-        return str(value)
-
-
-@st.dialog("Processed Invoice Details")
-def show_processed_invoice_dialog(invoice):
-    details = (
-        ("Date Processed", format_processed_timestamp(invoice["processed_timestamp"])),
-        ("Invoice Date", invoice["invoice_date"]),
-        ("Invoice Number", invoice["invoice_number"]),
-        ("Vehicle Number", invoice["vehicle_number"]),
-        ("Customer Code", invoice["customer_code"]),
-        ("Customer Name", invoice["customer_name"]),
-        ("From", invoice["origin"]),
-        ("To", invoice["destination"]),
-        ("Vehicle Type", invoice["vehicle_type"]),
-        ("Cases", invoice["cases"]),
-        ("Jars", invoice["jars"]),
-        ("Freight Charge", format_history_freight_charge(invoice["freight_charge"])),
-        ("Lookup Status", invoice["lookup_status"]),
-    )
-    for label, value in details:
-        label_column, value_column = st.columns([0.38, 0.62])
-        label_column.markdown(f"**{label}**")
-        value_column.write("" if value is None else value)
-
-    if st.button("Close", key="close_processed_invoice_dialog"):
-        st.session_state["selected_history_invoice_id"] = None
-        st.rerun()
-
-
-def render_processed_invoice_history(database_path):
-    search_query = st.text_input(
-        "Search invoice history",
-        placeholder="Search by invoice number or customer name",
-        key="processed_invoice_history_search",
-    )
-    history_rows = search_processed_invoices(search_query, database_path)
-
-    with st.container(height=360, border=True):
-        header_columns = st.columns([1.5, 1.5, 2.2, 1.2, 0.7])
-        for column, label in zip(
-            header_columns,
-            (
-                "Date Processed",
-                "Invoice Number",
-                "Customer Name",
-                "Freight Charge",
-                "Actions",
-            ),
-        ):
-            column.markdown(f"**{label}**")
-
-        if not history_rows:
-            st.caption("No processed invoices found.")
-
-        for row in history_rows:
-            columns = st.columns([1.5, 1.5, 2.2, 1.2, 0.7])
-            columns[0].write(format_processed_timestamp(row["processed_timestamp"]))
-            columns[1].write(row["invoice_number"] or "")
-            columns[2].write(row["customer_name"] or "")
-            columns[3].write(format_history_freight_charge(row["freight_charge"]))
-            if columns[4].button("View", key=f"view_processed_invoice_{row['id']}"):
-                st.session_state["selected_history_invoice_id"] = row["id"]
-
-    selected_history_id = st.session_state.get("selected_history_invoice_id")
-    if selected_history_id is not None:
-        selected_invoice = get_processed_invoice(selected_history_id, database_path)
-        if selected_invoice is not None:
-            show_processed_invoice_dialog(selected_invoice)
 
 
 @st.dialog("Duplicate Invoices", width="large")
@@ -726,7 +607,6 @@ def show_duplicate_invoice_dialog(database_path):
             type="tertiary",
         ):
             store_processed_invoice(record, database_path)
-            load_dashboard_counts.clear()
             current_bill_data = st.session_state.get("bill_data")
             reuploaded_data = pd.DataFrame([record], columns=COLUMNS)
             if current_bill_data is None or current_bill_data.empty:
@@ -782,69 +662,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-dashboard_today = local_today()
-initialize_history_store(DATABASE_TARGET)
-maintain_monthly_history(
-    DATABASE_TARGET,
-    dashboard_today.replace(day=1),
-)
-dashboard_counts = load_dashboard_counts(DATABASE_TARGET, dashboard_today)
-
-st.markdown('<div class="section-label">Billing Dashboard</div>', unsafe_allow_html=True)
-today_column, week_column, month_column = st.columns(3)
-for column, label, value in (
-    (today_column, "Today's Bills", dashboard_counts["today"]),
-    (week_column, "This Week", dashboard_counts["week"]),
-    (month_column, "This Month", dashboard_counts["month"]),
-):
-    with column:
-        st.markdown(
-            f"""
-            <div class="onboarding-card">
-                <h4>{label}</h4>
-                <p>{value:,}</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-st.markdown('<div style="height: 1rem;"></div>', unsafe_allow_html=True)
-
-if st.button("Processed Invoice History", key="toggle_processed_invoice_history"):
-    st.session_state["show_processed_invoice_history"] = not st.session_state.get(
-        "show_processed_invoice_history",
-        False,
-    )
-
-if st.session_state.get("show_processed_invoice_history", False):
-    render_processed_invoice_history(DATABASE_TARGET)
-
-st.markdown('<div class="section-label">Custom Report</div>', unsafe_allow_html=True)
-from_column, to_column, generate_column = st.columns([1, 1, 0.7])
-with from_column:
-    start_date = st.date_input("From Date", value=local_today(), key="custom_report_start")
-with to_column:
-    end_date = st.date_input("To Date", value=local_today(), key="custom_report_end")
-with generate_column:
-    st.write("")
-    generate_report = st.button("Generate", key="generate_custom_report")
-
-if generate_report:
-    if start_date > end_date:
-        st.error("From Date must be on or before To Date.")
-    else:
-        st.session_state["custom_report_count"] = get_custom_count(start_date, end_date)
-
-if "custom_report_count" in st.session_state:
-    st.markdown(
-        f"""
-        <div class="onboarding-card">
-            <h4>Invoices Processed</h4>
-            <p>{st.session_state['custom_report_count']:,}</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+init_invoice_history_database(DATABASE_PATH)
 
 st.markdown('<div class="section-label">Upload Bisleri Bills</div>', unsafe_allow_html=True)
 
@@ -875,10 +693,8 @@ if st.button("Process Bills", disabled=not uploaded_files):
             records = apply_freight_lookup(records, build_freight_lookup(master_data))
             accepted_records, duplicates = store_new_invoice_records(
                 records,
-                DATABASE_TARGET,
+                DATABASE_PATH,
             )
-            if accepted_records:
-                load_dashboard_counts.clear()
             st.session_state["bill_data"] = pd.DataFrame(
                 accepted_records,
                 columns=COLUMNS,
@@ -891,7 +707,7 @@ if st.button("Process Bills", disabled=not uploaded_files):
         except Exception as error:
             st.error(f"Failed to process bills: {error}")
 
-render_processing_summary(DATABASE_TARGET)
+render_processing_summary(DATABASE_PATH)
 
 if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
     st.subheader("Review & Edit Extracted Data")

@@ -4,4 +4,3 @@ pandas
 Pillow
 pypdf
 openpyxl
-pg8000==1.31.5

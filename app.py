@@ -1,4 +1,5 @@
 import io
+import importlib
 import json
 import os
 import re
@@ -25,6 +26,14 @@ from freight_master import (
     normalize_loading_point,
     short_origin,
 )
+
+# Streamlit Cloud can hot-reload this entrypoint while retaining an older
+# imported module in the worker process. Reload the local history module before
+# importing its API so app.py and invoice_history.py cannot get out of sync.
+import invoice_history
+
+importlib.reload(invoice_history)
+
 from invoice_history import (
     filter_unprocessed_uploads,
     get_processed_invoice,

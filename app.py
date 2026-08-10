@@ -26,11 +26,14 @@ from freight_master import (
     short_origin,
 )
 from invoice_history import (
+    filter_unprocessed_uploads,
     get_processed_invoice,
     init_invoice_history_database,
+    log_gemini_usage,
     search_processed_invoices,
     store_new_invoice_records,
     store_processed_invoice,
+    store_processed_uploads,
 )
 from billing_statement import (
     SUMMARY_COLUMNS,
@@ -46,13 +49,10 @@ except st.errors.StreamlitSecretNotFoundError:
 
 API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GENAI_API_KEY") or streamlit_api_key
 MODEL_FALLBACKS = [
-    "gemini-flash-lite-latest",
-    "gemini-flash-latest",
     "gemini-3.1-flash-lite",
-    "gemini-2.0-flash-lite",
-    "gemini-2.0-flash-lite-001",
+    "gemini-2.5-flash-lite",
 ]
-MAX_RETRIES = 5
+MAX_RETRIES = 2
 INITIAL_BACKOFF_SECONDS = 4
 DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "billing_history.db")
 
@@ -549,7 +549,6 @@ def analyze_bills(uploaded_files):
                 )
                 print("DEBUG raw Gemini response before parse_gemini_response:")
                 print(response.text)
-                return parse_gemini_response(response.text)
             except Exception as e:
                 last_error = e
                 error_text = str(e).lower()
@@ -557,6 +556,9 @@ def analyze_bills(uploaded_files):
                 if "not_found" in error_text or "not found" in error_text:
                     st.warning(f"Model {model_name} unavailable; switching to next available model.")
                     break
+
+                if not is_retryable_error(e):
+                    raise
 
                 if attempt < MAX_RETRIES:
                     st.warning(
@@ -567,6 +569,15 @@ def analyze_bills(uploaded_files):
 
                 st.warning(f"Exhausted retries for {model_name}; trying the next available model.")
                 break
+
+            log_gemini_usage(
+                model_name,
+                getattr(response, "model_version", ""),
+                len(uploaded_files),
+                getattr(response, "usage_metadata", None),
+                DATABASE_PATH,
+            )
+            return parse_gemini_response(response.text)
 
     if last_error is not None:
         raise last_error
@@ -940,7 +951,20 @@ if uploaded_files:
 if st.button("Process Bills", disabled=not uploaded_files):
     with st.spinner("AI is analyzing documents..."):
         try:
-            records = analyze_bills(uploaded_files)
+            files_to_process, repeated_files = filter_unprocessed_uploads(
+                uploaded_files,
+                DATABASE_PATH,
+            )
+            if repeated_files:
+                st.warning(
+                    f"Skipped {len(repeated_files)} identical file(s) already processed "
+                    "or repeated in this upload. No Gemini credits were used for them."
+                )
+            if not files_to_process:
+                st.info("All uploaded files were already processed. Gemini was not called.")
+                st.stop()
+
+            records = analyze_bills(files_to_process)
             master_data = load_customer_master()
             customer_lookup = build_customer_lookup(master_data)
             records = apply_customer_master_lookup(records, customer_lookup)
@@ -949,6 +973,7 @@ if st.button("Process Bills", disabled=not uploaded_files):
                 records,
                 DATABASE_PATH,
             )
+            store_processed_uploads(files_to_process, DATABASE_PATH)
             for accepted_record in accepted_records:
                 log_processed_invoice(
                     accepted_record.get(

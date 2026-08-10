@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime
 
 from invoice_history import (
+    filter_unprocessed_uploads,
     find_processed_invoice_by_number,
     get_processed_invoice,
     init_invoice_history_database,
@@ -11,7 +12,17 @@ from invoice_history import (
     store_new_invoice_records,
     store_processed_invoice,
     store_processed_invoice_if_new,
+    store_processed_uploads,
 )
+
+
+class UploadedFile:
+    def __init__(self, name, payload):
+        self.name = name
+        self._payload = payload
+
+    def getvalue(self):
+        return self._payload
 
 
 class ProcessedInvoiceHistoryTests(unittest.TestCase):
@@ -195,6 +206,30 @@ class ProcessedInvoiceHistoryTests(unittest.TestCase):
         self.assertEqual(accepted[0]["Case"], 550)
         self.assertEqual(len(duplicates), 1)
         self.assertEqual(duplicates[0]["record"]["Invoice No."], "NEW-002")
+
+    def test_exact_upload_is_skipped_after_successful_processing(self):
+        original = UploadedFile("invoice-a.jpg", b"same invoice bytes")
+        renamed_copy = UploadedFile("renamed.jpg", b"same invoice bytes")
+
+        new_files, repeats = filter_unprocessed_uploads([original], self.database_path)
+        self.assertEqual(new_files, [original])
+        self.assertEqual(repeats, [])
+
+        store_processed_uploads(new_files, self.database_path)
+        new_files, repeats = filter_unprocessed_uploads([renamed_copy], self.database_path)
+        self.assertEqual(new_files, [])
+        self.assertEqual(repeats, [renamed_copy])
+
+    def test_same_file_twice_in_one_batch_is_sent_only_once(self):
+        first = UploadedFile("one.jpg", b"duplicate payload")
+        second = UploadedFile("two.jpg", b"duplicate payload")
+
+        new_files, repeats = filter_unprocessed_uploads(
+            [first, second], self.database_path
+        )
+
+        self.assertEqual(new_files, [first])
+        self.assertEqual(repeats, [second])
 
 
 if __name__ == "__main__":

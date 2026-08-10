@@ -1,3 +1,4 @@
+import hashlib
 import os
 import sqlite3
 from datetime import datetime
@@ -49,6 +50,30 @@ def init_invoice_history_database(database_path=DEFAULT_DATABASE_PATH):
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS processed_upload_history (
+                file_hash TEXT PRIMARY KEY,
+                filename TEXT,
+                processed_timestamp TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gemini_usage_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                processed_timestamp TEXT NOT NULL,
+                model_requested TEXT NOT NULL,
+                model_version TEXT,
+                file_count INTEGER NOT NULL,
+                prompt_tokens INTEGER,
+                output_tokens INTEGER,
+                thoughts_tokens INTEGER,
+                total_tokens INTEGER
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_processed_invoice_number
             ON processed_invoice_history(invoice_number)
             """
@@ -58,6 +83,81 @@ def init_invoice_history_database(database_path=DEFAULT_DATABASE_PATH):
             CREATE INDEX IF NOT EXISTS idx_processed_customer_name
             ON processed_invoice_history(customer_name)
             """
+        )
+
+
+def upload_digest(uploaded_file):
+    """Return a stable fingerprint without trusting the uploaded filename."""
+    return hashlib.sha256(uploaded_file.getvalue()).hexdigest()
+
+
+def filter_unprocessed_uploads(uploaded_files, database_path=DEFAULT_DATABASE_PATH):
+    """Split uploads into new files and exact byte-for-byte repeats."""
+    new_files = []
+    duplicate_files = []
+    seen_in_batch = set()
+    with sqlite3.connect(database_path) as connection:
+        for uploaded_file in uploaded_files:
+            file_hash = upload_digest(uploaded_file)
+            already_processed = connection.execute(
+                "SELECT 1 FROM processed_upload_history WHERE file_hash = ?",
+                (file_hash,),
+            ).fetchone()
+            if already_processed is not None or file_hash in seen_in_batch:
+                duplicate_files.append(uploaded_file)
+                continue
+            seen_in_batch.add(file_hash)
+            new_files.append(uploaded_file)
+    return new_files, duplicate_files
+
+
+def store_processed_uploads(uploaded_files, database_path=DEFAULT_DATABASE_PATH):
+    """Remember uploads only after Gemini returned a parseable result."""
+    processed_timestamp = datetime.now().isoformat(timespec="seconds")
+    with sqlite3.connect(database_path) as connection:
+        connection.executemany(
+            """
+            INSERT OR IGNORE INTO processed_upload_history
+                (file_hash, filename, processed_timestamp)
+            VALUES (?, ?, ?)
+            """,
+            [
+                (upload_digest(uploaded_file), uploaded_file.name, processed_timestamp)
+                for uploaded_file in uploaded_files
+            ],
+        )
+
+
+def log_gemini_usage(
+    model_requested,
+    model_version,
+    file_count,
+    usage_metadata,
+    database_path=DEFAULT_DATABASE_PATH,
+):
+    """Persist API token accounting without storing invoice contents."""
+    def usage_value(name):
+        value = getattr(usage_metadata, name, None) if usage_metadata else None
+        return int(value) if value is not None else None
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO gemini_usage_history (
+                processed_timestamp, model_requested, model_version, file_count,
+                prompt_tokens, output_tokens, thoughts_tokens, total_tokens
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now().isoformat(timespec="seconds"),
+                model_requested,
+                model_version or "",
+                file_count,
+                usage_value("prompt_token_count"),
+                usage_value("candidates_token_count"),
+                usage_value("thoughts_token_count"),
+                usage_value("total_token_count"),
+            ),
         )
 
 

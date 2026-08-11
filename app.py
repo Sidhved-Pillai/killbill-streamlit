@@ -59,7 +59,8 @@ except st.errors.StreamlitSecretNotFoundError:
 API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GENAI_API_KEY") or streamlit_api_key
 MODEL_FALLBACKS = [
     "gemini-3.1-flash-lite",
-    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash-lite",
+    "gemini-3.6-flash",
 ]
 MAX_RETRIES = 2
 INITIAL_BACKOFF_SECONDS = 4

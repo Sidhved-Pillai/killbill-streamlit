@@ -17,11 +17,9 @@ API_KEY = (
     or st.secrets.get("GOOGLE_API_KEY", "")
 )
 MODEL_FALLBACKS = [
-    "gemini-flash-lite-latest",
-    "gemini-flash-latest",
     "gemini-3.1-flash-lite",
-    "gemini-2.0-flash-lite",
-    "gemini-2.0-flash-lite-001",
+    "gemini-3.5-flash-lite",
+    "gemini-3.6-flash",
 ]
 MAX_RETRIES = 5
 INITIAL_BACKOFF_SECONDS = 4

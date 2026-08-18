@@ -958,23 +958,51 @@ if uploaded_files:
         unsafe_allow_html=True,
     )
 
-if st.button("Process Bills", disabled=not uploaded_files):
+files_to_process = []
+repeated_files = []
+selected_repeated_files = []
+if uploaded_files:
+    files_to_process, repeated_files = filter_unprocessed_uploads(
+        uploaded_files,
+        DATABASE_PATH,
+    )
+
+if repeated_files:
+    st.warning(
+        f"Found {len(repeated_files)} identical file(s) that were already processed "
+        "or repeated in this upload."
+    )
+    process_repeated_files = st.checkbox(
+        "Process duplicate invoices anyway",
+        key="process_duplicate_uploads_anyway",
+        help="Selected files will be sent to Gemini again and may use additional credits.",
+    )
+    if process_repeated_files:
+        with st.expander("Select duplicate files to process", expanded=True):
+            selected_repeated_indexes = st.multiselect(
+                "Duplicate files",
+                options=list(range(len(repeated_files))),
+                default=list(range(len(repeated_files))),
+                format_func=lambda index: repeated_files[index].name,
+                key="selected_duplicate_upload_indexes",
+            )
+            selected_repeated_files = [
+                repeated_files[index] for index in selected_repeated_indexes
+            ]
+
+files_selected_for_processing = files_to_process + selected_repeated_files
+
+if st.button("Process Bills", disabled=not files_selected_for_processing):
     with st.spinner("AI is analyzing documents..."):
         try:
-            files_to_process, repeated_files = filter_unprocessed_uploads(
-                uploaded_files,
-                DATABASE_PATH,
-            )
-            if repeated_files:
+            skipped_repeated_count = len(repeated_files) - len(selected_repeated_files)
+            if skipped_repeated_count:
                 st.warning(
-                    f"Skipped {len(repeated_files)} identical file(s) already processed "
+                    f"Skipped {skipped_repeated_count} identical file(s) already processed "
                     "or repeated in this upload. No Gemini credits were used for them."
                 )
-            if not files_to_process:
-                st.info("All uploaded files were already processed. Gemini was not called.")
-                st.stop()
 
-            records = analyze_bills(files_to_process)
+            records = analyze_bills(files_selected_for_processing)
             master_data = load_customer_master()
             customer_lookup = build_customer_lookup(master_data)
             records = apply_customer_master_lookup(records, customer_lookup)
@@ -983,7 +1011,7 @@ if st.button("Process Bills", disabled=not uploaded_files):
                 records,
                 DATABASE_PATH,
             )
-            store_processed_uploads(files_to_process, DATABASE_PATH)
+            store_processed_uploads(files_selected_for_processing, DATABASE_PATH)
             for accepted_record in accepted_records:
                 log_processed_invoice(
                     accepted_record.get(

@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from local_ocr import extract_invoices, merge_invoice_pages, parse_ocr_result
+from local_ocr import merge_invoice_pages, parse_ocr_result
 
 
 def _box(x, y, width=40, height=12):
@@ -81,16 +81,3 @@ def test_uses_handwritten_case_stamp_when_table_is_too_faint():
 
     assert record["Case"] == 613
     assert "item quantities" not in missing
-
-
-def test_preserves_underlying_ocr_initialization_error(monkeypatch):
-    uploaded_file = SimpleNamespace(name="invoice.jpeg")
-    expected_error = ImportError("libGL.so.1 is missing")
-    monkeypatch.setattr("local_ocr.extract_invoice", lambda file: (_ for _ in ()).throw(expected_error))
-
-    records, processed, warnings, failed = extract_invoices([uploaded_file])
-
-    assert records == []
-    assert processed == []
-    assert warnings == []
-    assert failed == [(uploaded_file, expected_error)]

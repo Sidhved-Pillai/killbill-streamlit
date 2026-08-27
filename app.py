@@ -1081,16 +1081,7 @@ if st.button("Process Bills", disabled=not files_selected_for_processing):
                 customer_lookup = build_customer_lookup(master_data)
             if not processed_files:
                 if processing_engine == "Local OCR (no API)":
-                    failure_detail = (
-                        f" First error: {type(failed_files[0][1]).__name__}: "
-                        f"{failed_files[0][1]}"
-                        if failed_files
-                        else ""
-                    )
-                    raise RuntimeError(
-                        "Local OCR could not read any of the uploaded bills."
-                        + failure_detail
-                    )
+                    raise RuntimeError("Local OCR could not read any of the uploaded bills.")
                 raise RuntimeError(
                     "Google could not process any bills right now because its models "
                     "are overloaded. No files were marked as processed; please retry shortly."

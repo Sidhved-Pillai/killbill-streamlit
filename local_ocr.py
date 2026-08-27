@@ -12,7 +12,7 @@ from freight_master import normalize_loading_point
 
 
 DATE_RE = re.compile(r"(?<!\d)(\d{1,2})\s*[-./]\s*(\d{1,2})\s*[-./]\s*(\d{2,4})(?!\d)")
-INVOICE_RE = re.compile(r"MUMC[I1]N[0-9A-Z]{6,}", re.I)
+INVOICE_RE = re.compile(r"MUMC[I1]N[0-9A-Z]{9}", re.I)
 CUSTOMER_RE = re.compile(r"MUMC(?![I1]N)[0-9A-Z]{5,}", re.I)
 VEHICLE_RE = re.compile(r"MH\s*0?4\s*[A-Z]{1,3}\s*\d{3,4}", re.I)
 
@@ -93,7 +93,9 @@ def _ocr_lines(image, psm=6):
 
 def _first_match(lines, pattern, transform=_identifier):
     for line in lines:
-        match = pattern.search(line["text"])
+        # Tesseract often inserts spaces inside identifiers (for example
+        # ``MUMCIN 270044985``). Match on compact text, not the display line.
+        match = pattern.search(_identifier(line["text"]))
         if match:
             return transform(match.group())
     return ""
@@ -108,8 +110,12 @@ def _quantities(table_lines):
                 break
         if qty_x is not None:
             break
-    if qty_x is None:
+    all_words = [word for line in table_lines for word in line["words"]]
+    if not all_words:
         return 0, 0
+    if qty_x is None:
+        table_right = max(word["x"] + word["width"] for word in all_words)
+        qty_x = table_right * 0.70
 
     cases = 0.0
     jars = 0.0
@@ -118,11 +124,17 @@ def _quantities(table_lines):
         if not any(token in normalized for token in ("WATER", "LTR", "BISW")):
             continue
         candidates = []
-        for word in line["words"]:
+        for word in all_words:
             center = word["x"] + word["width"] / 2
             match = re.fullmatch(r"(\d+(?:[.,]\d+)?)", word["text"].replace(" ", ""))
-            if match and abs(center - qty_x) < 180:
-                candidates.append((abs(center - qty_x), float(match.group(1).replace(",", "."))))
+            word_y = word["y"] + word["height"] / 2
+            if match and abs(center - qty_x) < 220 and abs(word_y - line["y"]) < 45:
+                candidates.append(
+                    (
+                        abs(center - qty_x) + abs(word_y - line["y"]),
+                        float(match.group(1).replace(",", ".")),
+                    )
+                )
         if not candidates:
             continue
         quantity = min(candidates)[1]
@@ -159,6 +171,11 @@ def extract_invoice(uploaded_file):
     invoice_date = ""
     for line in header_lines:
         if "DATE" in line["text"].upper():
+            invoice_date = _date(line["text"])
+            if invoice_date:
+                break
+    if not invoice_date:
+        for line in header_lines:
             invoice_date = _date(line["text"])
             if invoice_date:
                 break
@@ -234,7 +251,11 @@ def extract_invoices(uploaded_files, progress_callback=None, customer_codes=None
     records, processed, failed = [], [], []
     for index, uploaded_file in enumerate(uploaded_files, 1):
         try:
-            records.append(extract_invoice(uploaded_file))
+            record = extract_invoice(uploaded_file)
+            if not record["Invoice No."]:
+                raise ValueError("invoice number could not be read")
+            record["_source_file"] = uploaded_file
+            records.append(record)
             processed.append(uploaded_file)
         except Exception as error:
             failed.append((uploaded_file, error))
@@ -242,4 +263,18 @@ def extract_invoices(uploaded_files, progress_callback=None, customer_codes=None
             progress_callback(index, len(uploaded_files), uploaded_file.name)
     merged = _merge_pages(records, customer_codes)
     warnings = []
+    for record in merged:
+        source_file = record.pop("_source_file", None)
+        missing = [
+            label
+            for label, value in (
+                ("date", record.get("Date")),
+                ("vehicle number", record.get("Vehicle No.")),
+                ("customer code", record.get("Customer Code")),
+                ("case/jar quantity", (record.get("Case") or record.get("Jar"))),
+            )
+            if not value
+        ]
+        if missing and source_file is not None:
+            warnings.append((source_file, missing))
     return merged, processed, warnings, failed

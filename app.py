@@ -1105,6 +1105,15 @@ if st.button("Process Bills", disabled=not files_selected_for_processing):
             st.session_state["processing_new_count"] = len(accepted_records)
             st.session_state["duplicate_invoices"] = duplicates
             st.session_state["show_duplicate_invoice_details"] = False
+            if extraction_warnings:
+                warning_summary = "; ".join(
+                    f"{file.name}: {', '.join(missing)}"
+                    for file, missing in extraction_warnings
+                )
+                st.warning(
+                    "Local OCR extracted these invoices, but the listed fields must "
+                    f"be checked in the editable table: {warning_summary}"
+                )
             if failed_files:
                 failed_names = ", ".join(file.name for file, _ in failed_files)
                 st.error(

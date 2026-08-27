@@ -91,22 +91,6 @@ class BillingStatementTests(unittest.TestCase):
         self.assertEqual(len(summary), 2)
         self.assertEqual(summary["Sr. No."].tolist(), [1, 1])
 
-    def test_workbook_opens_month_with_most_invoices(self):
-        june = self.dataframe.iloc[[0]].copy()
-        june["Date"] = "30-Jun-26"
-        july = self.dataframe.iloc[:3].copy()
-        july["Date"] = ["01-Jul-26", "08-Jul-26", "09-Jul-26"]
-        summary = build_billing_statement(pd.concat([june, july], ignore_index=True))
-
-        workbook = load_workbook(io.BytesIO(build_billing_statement_workbook(summary)))
-
-        self.assertEqual(workbook.sheetnames, ["Jun 2026", "Jul 2026"])
-        self.assertEqual(workbook.active.title, "Jul 2026")
-        self.assertEqual(
-            {workbook.active.cell(row, 3).value for row in range(4, 7)},
-            {"INV-001", "INV-002", "INV-003"},
-        )
-
     def test_workbook_matches_template_title_headers_totals_and_signature(self):
         summary = build_billing_statement(self.dataframe)
         workbook = load_workbook(

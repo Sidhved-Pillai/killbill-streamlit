@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -25,7 +26,6 @@ from freight_master import (
     normalize_loading_point,
     short_origin,
 )
-from local_ocr import extract_invoices
 
 # Streamlit Cloud can hot-reload this entrypoint while retaining an older
 # imported module in the worker process. Reload the local history module before
@@ -58,12 +58,12 @@ except st.errors.StreamlitSecretNotFoundError:
 
 API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GENAI_API_KEY") or streamlit_api_key
 MODEL_FALLBACKS = [
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
+    "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
+    "gemini-3.6-flash",
 ]
-REQUEST_TIMEOUT_MS = 30_000
-PROCESSING_BATCH_SIZE = 4
+MAX_RETRIES = 2
+INITIAL_BACKOFF_SECONDS = 4
 DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "billing_history.db")
 
 PREMIUM_CSS = """
@@ -539,98 +539,60 @@ def is_retryable_error(error):
     return any(token in error_text for token in retry_tokens)
 
 
-def _analyze_bill_batch(client, uploaded_files):
+def analyze_bills(uploaded_files):
+    if not API_KEY:
+        raise ValueError(
+            "Missing API key. Set GOOGLE_API_KEY in the environment or add it to Streamlit secrets."
+        )
+
+    client = genai.Client(api_key=API_KEY)
     content_parts = build_batch_content_parts(uploaded_files)
 
     last_error = None
-    last_retryable_error = None
     for model_name in MODEL_FALLBACKS:
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=content_parts,
-                config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION),
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=content_parts,
+                    config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION),
+                )
+                print("DEBUG raw Gemini response before parse_gemini_response:")
+                print(response.text)
+            except Exception as e:
+                last_error = e
+                error_text = str(e).lower()
+
+                if "not_found" in error_text or "not found" in error_text:
+                    st.warning(f"Model {model_name} unavailable; switching to next available model.")
+                    break
+
+                if not is_retryable_error(e):
+                    raise
+
+                if attempt < MAX_RETRIES:
+                    st.warning(
+                        f"Google servers busy on {model_name}; retrying in 4 seconds... ({attempt}/{MAX_RETRIES})"
+                    )
+                    time.sleep(INITIAL_BACKOFF_SECONDS)
+                    continue
+
+                st.warning(f"Exhausted retries for {model_name}; trying the next available model.")
+                break
+
+            log_gemini_usage(
+                model_name,
+                getattr(response, "model_version", ""),
+                len(uploaded_files),
+                getattr(response, "usage_metadata", None),
+                DATABASE_PATH,
             )
-            print("DEBUG raw Gemini response before parse_gemini_response:")
-            print(response.text)
-        except Exception as e:
-            last_error = e
-            error_text = str(e).lower()
+            return parse_gemini_response(response.text)
 
-            if "not_found" in error_text or "not found" in error_text:
-                st.warning(f"Model {model_name} unavailable; switching models.")
-                continue
-
-            if not is_retryable_error(e):
-                raise
-
-            last_retryable_error = e
-            st.warning(f"Google is busy on {model_name}; switching models.")
-            continue
-
-        log_gemini_usage(
-            model_name,
-            getattr(response, "model_version", ""),
-            len(uploaded_files),
-            getattr(response, "usage_metadata", None),
-            DATABASE_PATH,
-        )
-        return parse_gemini_response(response.text)
-
-    # A later unavailable-model 404 must not hide the transient overload that
-    # caused the usable models to fail (as happened in the production report).
-    if last_retryable_error is not None:
-        raise last_retryable_error
     if last_error is not None:
         raise last_error
 
     return []
-
-
-def analyze_bills(uploaded_files):
-    """Analyze one group of bills, retaining the original public API for tests."""
-    if not API_KEY:
-        raise ValueError(
-            "Missing API key. Set GOOGLE_API_KEY in the environment or add it to Streamlit secrets."
-        )
-    return _analyze_bill_batch(build_genai_client(), uploaded_files)
-
-
-def build_genai_client():
-    """Build a time-bounded client without the SDK's five hidden retries."""
-    return genai.Client(
-        api_key=API_KEY,
-        http_options=types.HttpOptions(
-            timeout=REQUEST_TIMEOUT_MS,
-            retry_options=types.HttpRetryOptions(attempts=1),
-        ),
-    )
-
-
-def analyze_bills_resilient(uploaded_files):
-    """Process small batches and isolate failures to individual uploaded files."""
-    if not API_KEY:
-        raise ValueError(
-            "Missing API key. Set GOOGLE_API_KEY in the environment or add it to Streamlit secrets."
-        )
-
-    client = build_genai_client()
-    records = []
-    processed_files = []
-    failed_files = []
-    for start in range(0, len(uploaded_files), PROCESSING_BATCH_SIZE):
-        batch = uploaded_files[start : start + PROCESSING_BATCH_SIZE]
-        try:
-            records.extend(_analyze_bill_batch(client, batch))
-            processed_files.extend(batch)
-        except Exception as batch_error:
-            # A 503/429 is a provider-wide capacity problem. Retrying this batch
-            # as individual files multiplies latency without improving it.
-            remaining_files = uploaded_files[start:]
-            failed_files.extend((file, batch_error) for file in remaining_files)
-            break
-
-    return records, processed_files, failed_files
 
 
 def init_database():
@@ -985,13 +947,6 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True,
 )
 
-processing_engine = st.radio(
-    "Processing engine",
-    ("Local OCR (no API)", "Gemini API"),
-    horizontal=True,
-    help="Local OCR runs inside the app. Gemini remains available as an optional fallback.",
-)
-
 if uploaded_files:
     file_count = len(uploaded_files)
     st.markdown(
@@ -1020,7 +975,7 @@ if repeated_files:
     process_repeated_files = st.checkbox(
         "Process duplicate invoices anyway",
         key="process_duplicate_uploads_anyway",
-        help="Selected files will be extracted again using the chosen engine.",
+        help="Selected files will be sent to Gemini again and may use additional credits.",
     )
     if process_repeated_files:
         with st.expander("Select duplicate files to process", expanded=True):
@@ -1038,11 +993,7 @@ if repeated_files:
 files_selected_for_processing = files_to_process + selected_repeated_files
 
 if st.button("Process Bills", disabled=not files_selected_for_processing):
-    with st.spinner(
-        "Reading invoices locally..."
-        if processing_engine == "Local OCR (no API)"
-        else "AI is analyzing documents..."
-    ):
+    with st.spinner("AI is analyzing documents..."):
         try:
             skipped_repeated_count = len(repeated_files) - len(selected_repeated_files)
             if skipped_repeated_count:
@@ -1051,45 +1002,16 @@ if st.button("Process Bills", disabled=not files_selected_for_processing):
                     "or repeated in this upload. No Gemini credits were used for them."
                 )
 
-            extraction_warnings = []
-            if processing_engine == "Local OCR (no API)":
-                master_data = load_customer_master()
-                customer_lookup = build_customer_lookup(master_data)
-                progress = st.progress(0, text="Starting local OCR...")
-
-                def update_progress(current, total, filename):
-                    progress.progress(current / total, text=f"Reading {current} of {total}: {filename}")
-
-                records, processed_files, extraction_warnings, failed_files = extract_invoices(
-                    files_selected_for_processing,
-                    progress_callback=update_progress,
-                    customer_codes=set(customer_lookup),
-                )
-                progress.empty()
-            else:
-                records, processed_files, failed_files = analyze_bills_resilient(
-                    files_selected_for_processing
-                )
-                master_data = load_customer_master()
-                customer_lookup = build_customer_lookup(master_data)
-            if not processed_files:
-                if processing_engine == "Local OCR (no API)":
-                    detail = (
-                        f" {type(failed_files[0][1]).__name__}: {failed_files[0][1]}"
-                        if failed_files else ""
-                    )
-                    raise RuntimeError("Local OCR failed to start." + detail)
-                raise RuntimeError(
-                    "Google could not process any bills right now because its models "
-                    "are overloaded. No files were marked as processed; please retry shortly."
-                )
+            records = analyze_bills(files_selected_for_processing)
+            master_data = load_customer_master()
+            customer_lookup = build_customer_lookup(master_data)
             records = apply_customer_master_lookup(records, customer_lookup)
             records = apply_freight_lookup(records, build_freight_lookup(master_data))
             accepted_records, duplicates = store_new_invoice_records(
                 records,
                 DATABASE_PATH,
             )
-            store_processed_uploads(processed_files, DATABASE_PATH)
+            store_processed_uploads(files_selected_for_processing, DATABASE_PATH)
             for accepted_record in accepted_records:
                 log_processed_invoice(
                     accepted_record.get(
@@ -1105,22 +1027,6 @@ if st.button("Process Bills", disabled=not files_selected_for_processing):
             st.session_state["processing_new_count"] = len(accepted_records)
             st.session_state["duplicate_invoices"] = duplicates
             st.session_state["show_duplicate_invoice_details"] = False
-            if extraction_warnings:
-                warning_summary = "; ".join(
-                    f"{file.name}: {', '.join(missing)}"
-                    for file, missing in extraction_warnings
-                )
-                st.warning(
-                    "Local OCR extracted these invoices, but the listed fields must "
-                    f"be checked in the editable table: {warning_summary}"
-                )
-            if failed_files:
-                failed_names = ", ".join(file.name for file, _ in failed_files)
-                st.error(
-                    f"Processed {len(processed_files)} file(s), but {len(failed_files)} "
-                    f"file(s) still need to be retried: {failed_names}. These failed "
-                    "files were not marked as processed."
-                )
         except json.JSONDecodeError:
             st.error("Gemini returned invalid JSON. Please try processing again.")
         except Exception as error:
@@ -1152,12 +1058,6 @@ if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
     if billing_statement.empty:
         st.caption("No invoice entries are available for the billing statement.")
     else:
-        month_count = billing_statement["_bill_month"].nunique(dropna=False)
-        if month_count > 1:
-            st.caption(
-                "Invoices are exported to separate month tabs. The workbook opens "
-                "the tab containing the most entries first."
-            )
         st.dataframe(
             billing_statement[SUMMARY_COLUMNS],
             use_container_width=True,

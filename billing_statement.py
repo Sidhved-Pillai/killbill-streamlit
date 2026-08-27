@@ -216,8 +216,6 @@ def build_billing_statement_workbook(summary):
     workbook = Workbook()
     workbook.remove(workbook.active)
     months = list(summary["_bill_month"].drop_duplicates())
-    largest_sheet = None
-    largest_sheet_size = -1
     for month in months:
         worksheet = workbook.create_sheet(_safe_sheet_title(month))
         if pd.isna(month):
@@ -225,13 +223,6 @@ def build_billing_statement_workbook(summary):
         else:
             month_data = summary.loc[summary["_bill_month"] == month, SUMMARY_COLUMNS]
         _write_month_sheet(worksheet, month_data, month)
-        if len(month_data) > largest_sheet_size:
-            largest_sheet = worksheet
-            largest_sheet_size = len(month_data)
-
-    # Excel opens the active sheet first. Opening a small earlier month can
-    # otherwise make the invoices on later tabs look missing.
-    workbook.active = workbook.index(largest_sheet)
 
     output = io.BytesIO()
     workbook.save(output)

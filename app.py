@@ -2,10 +2,8 @@ import io
 import importlib
 import json
 import os
-import random
 import re
 import sqlite3
-import time
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -61,12 +59,9 @@ API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GENAI_API_KEY") or streamlit
 MODEL_FALLBACKS = [
     "gemini-3.7-flash",
     "gemini-3.6-flash",
-    "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
 ]
-MAX_RETRIES = 2
-INITIAL_BACKOFF_SECONDS = 2
+REQUEST_TIMEOUT_MS = 30_000
 PROCESSING_BATCH_SIZE = 4
 DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "billing_history.db")
 
@@ -549,49 +544,37 @@ def _analyze_bill_batch(client, uploaded_files):
     last_error = None
     last_retryable_error = None
     for model_name in MODEL_FALLBACKS:
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=content_parts,
-                    config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION),
-                )
-                print("DEBUG raw Gemini response before parse_gemini_response:")
-                print(response.text)
-            except Exception as e:
-                last_error = e
-                error_text = str(e).lower()
-
-                if "not_found" in error_text or "not found" in error_text:
-                    st.warning(f"Model {model_name} unavailable; switching to next available model.")
-                    break
-
-                if not is_retryable_error(e):
-                    raise
-
-                last_retryable_error = e
-
-                if attempt < MAX_RETRIES:
-                    delay = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
-                    delay += random.uniform(0, 1)
-                    st.warning(
-                        f"Google servers busy on {model_name}; retrying in "
-                        f"{delay:.1f} seconds... ({attempt}/{MAX_RETRIES})"
-                    )
-                    time.sleep(delay)
-                    continue
-
-                st.warning(f"Exhausted retries for {model_name}; trying the next available model.")
-                break
-
-            log_gemini_usage(
-                model_name,
-                getattr(response, "model_version", ""),
-                len(uploaded_files),
-                getattr(response, "usage_metadata", None),
-                DATABASE_PATH,
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=content_parts,
+                config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION),
             )
-            return parse_gemini_response(response.text)
+            print("DEBUG raw Gemini response before parse_gemini_response:")
+            print(response.text)
+        except Exception as e:
+            last_error = e
+            error_text = str(e).lower()
+
+            if "not_found" in error_text or "not found" in error_text:
+                st.warning(f"Model {model_name} unavailable; switching models.")
+                continue
+
+            if not is_retryable_error(e):
+                raise
+
+            last_retryable_error = e
+            st.warning(f"Google is busy on {model_name}; switching models.")
+            continue
+
+        log_gemini_usage(
+            model_name,
+            getattr(response, "model_version", ""),
+            len(uploaded_files),
+            getattr(response, "usage_metadata", None),
+            DATABASE_PATH,
+        )
+        return parse_gemini_response(response.text)
 
     # A later unavailable-model 404 must not hide the transient overload that
     # caused the usable models to fail (as happened in the production report).
@@ -609,7 +592,18 @@ def analyze_bills(uploaded_files):
         raise ValueError(
             "Missing API key. Set GOOGLE_API_KEY in the environment or add it to Streamlit secrets."
         )
-    return _analyze_bill_batch(genai.Client(api_key=API_KEY), uploaded_files)
+    return _analyze_bill_batch(build_genai_client(), uploaded_files)
+
+
+def build_genai_client():
+    """Build a time-bounded client without the SDK's five hidden retries."""
+    return genai.Client(
+        api_key=API_KEY,
+        http_options=types.HttpOptions(
+            timeout=REQUEST_TIMEOUT_MS,
+            retry_options=types.HttpRetryOptions(attempts=1),
+        ),
+    )
 
 
 def analyze_bills_resilient(uploaded_files):
@@ -619,7 +613,7 @@ def analyze_bills_resilient(uploaded_files):
             "Missing API key. Set GOOGLE_API_KEY in the environment or add it to Streamlit secrets."
         )
 
-    client = genai.Client(api_key=API_KEY)
+    client = build_genai_client()
     records = []
     processed_files = []
     failed_files = []
@@ -628,22 +622,12 @@ def analyze_bills_resilient(uploaded_files):
         try:
             records.extend(_analyze_bill_batch(client, batch))
             processed_files.extend(batch)
-            continue
         except Exception as batch_error:
-            if len(batch) == 1:
-                failed_files.append((batch[0], batch_error))
-                continue
-            st.warning(
-                f"A batch of {len(batch)} bills could not be processed together; "
-                "retrying each bill separately."
-            )
-
-        for uploaded_file in batch:
-            try:
-                records.extend(_analyze_bill_batch(client, [uploaded_file]))
-                processed_files.append(uploaded_file)
-            except Exception as error:
-                failed_files.append((uploaded_file, error))
+            # A 503/429 is a provider-wide capacity problem. Retrying this batch
+            # as individual files multiplies latency without improving it.
+            remaining_files = uploaded_files[start:]
+            failed_files.extend((file, batch_error) for file in remaining_files)
+            break
 
     return records, processed_files, failed_files
 

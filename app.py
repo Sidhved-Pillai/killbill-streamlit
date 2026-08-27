@@ -59,14 +59,15 @@ except st.errors.StreamlitSecretNotFoundError:
 
 API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GENAI_API_KEY") or streamlit_api_key
 MODEL_FALLBACKS = [
-    "gemini-3.1-flash-lite",
-    "gemini-3.5-flash-lite",
+    "gemini-3.7-flash",
     "gemini-3.6-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
 ]
-MAX_RETRIES = 3
+MAX_RETRIES = 2
 INITIAL_BACKOFF_SECONDS = 2
+PROCESSING_BATCH_SIZE = 4
 DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "billing_history.db")
 
 PREMIUM_CSS = """
@@ -542,16 +543,11 @@ def is_retryable_error(error):
     return any(token in error_text for token in retry_tokens)
 
 
-def analyze_bills(uploaded_files):
-    if not API_KEY:
-        raise ValueError(
-            "Missing API key. Set GOOGLE_API_KEY in the environment or add it to Streamlit secrets."
-        )
-
-    client = genai.Client(api_key=API_KEY)
+def _analyze_bill_batch(client, uploaded_files):
     content_parts = build_batch_content_parts(uploaded_files)
 
     last_error = None
+    last_retryable_error = None
     for model_name in MODEL_FALLBACKS:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
@@ -572,6 +568,8 @@ def analyze_bills(uploaded_files):
 
                 if not is_retryable_error(e):
                     raise
+
+                last_retryable_error = e
 
                 if attempt < MAX_RETRIES:
                     delay = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
@@ -595,10 +593,59 @@ def analyze_bills(uploaded_files):
             )
             return parse_gemini_response(response.text)
 
+    # A later unavailable-model 404 must not hide the transient overload that
+    # caused the usable models to fail (as happened in the production report).
+    if last_retryable_error is not None:
+        raise last_retryable_error
     if last_error is not None:
         raise last_error
 
     return []
+
+
+def analyze_bills(uploaded_files):
+    """Analyze one group of bills, retaining the original public API for tests."""
+    if not API_KEY:
+        raise ValueError(
+            "Missing API key. Set GOOGLE_API_KEY in the environment or add it to Streamlit secrets."
+        )
+    return _analyze_bill_batch(genai.Client(api_key=API_KEY), uploaded_files)
+
+
+def analyze_bills_resilient(uploaded_files):
+    """Process small batches and isolate failures to individual uploaded files."""
+    if not API_KEY:
+        raise ValueError(
+            "Missing API key. Set GOOGLE_API_KEY in the environment or add it to Streamlit secrets."
+        )
+
+    client = genai.Client(api_key=API_KEY)
+    records = []
+    processed_files = []
+    failed_files = []
+    for start in range(0, len(uploaded_files), PROCESSING_BATCH_SIZE):
+        batch = uploaded_files[start : start + PROCESSING_BATCH_SIZE]
+        try:
+            records.extend(_analyze_bill_batch(client, batch))
+            processed_files.extend(batch)
+            continue
+        except Exception as batch_error:
+            if len(batch) == 1:
+                failed_files.append((batch[0], batch_error))
+                continue
+            st.warning(
+                f"A batch of {len(batch)} bills could not be processed together; "
+                "retrying each bill separately."
+            )
+
+        for uploaded_file in batch:
+            try:
+                records.extend(_analyze_bill_batch(client, [uploaded_file]))
+                processed_files.append(uploaded_file)
+            except Exception as error:
+                failed_files.append((uploaded_file, error))
+
+    return records, processed_files, failed_files
 
 
 def init_database():
@@ -1008,7 +1055,14 @@ if st.button("Process Bills", disabled=not files_selected_for_processing):
                     "or repeated in this upload. No Gemini credits were used for them."
                 )
 
-            records = analyze_bills(files_selected_for_processing)
+            records, processed_files, failed_files = analyze_bills_resilient(
+                files_selected_for_processing
+            )
+            if not processed_files:
+                raise RuntimeError(
+                    "Google could not process any bills right now because its models "
+                    "are overloaded. No files were marked as processed; please retry shortly."
+                )
             master_data = load_customer_master()
             customer_lookup = build_customer_lookup(master_data)
             records = apply_customer_master_lookup(records, customer_lookup)
@@ -1017,7 +1071,7 @@ if st.button("Process Bills", disabled=not files_selected_for_processing):
                 records,
                 DATABASE_PATH,
             )
-            store_processed_uploads(files_selected_for_processing, DATABASE_PATH)
+            store_processed_uploads(processed_files, DATABASE_PATH)
             for accepted_record in accepted_records:
                 log_processed_invoice(
                     accepted_record.get(
@@ -1033,6 +1087,13 @@ if st.button("Process Bills", disabled=not files_selected_for_processing):
             st.session_state["processing_new_count"] = len(accepted_records)
             st.session_state["duplicate_invoices"] = duplicates
             st.session_state["show_duplicate_invoice_details"] = False
+            if failed_files:
+                failed_names = ", ".join(file.name for file, _ in failed_files)
+                st.error(
+                    f"Processed {len(processed_files)} file(s), but {len(failed_files)} "
+                    f"file(s) still need to be retried: {failed_names}. These failed "
+                    "files were not marked as processed."
+                )
         except json.JSONDecodeError:
             st.error("Gemini returned invalid JSON. Please try processing again.")
         except Exception as error:

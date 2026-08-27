@@ -2,6 +2,7 @@ import io
 import importlib
 import json
 import os
+import random
 import re
 import sqlite3
 import time
@@ -61,9 +62,11 @@ MODEL_FALLBACKS = [
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
     "gemini-3.6-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
 ]
-MAX_RETRIES = 2
-INITIAL_BACKOFF_SECONDS = 4
+MAX_RETRIES = 3
+INITIAL_BACKOFF_SECONDS = 2
 DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "billing_history.db")
 
 PREMIUM_CSS = """
@@ -571,10 +574,13 @@ def analyze_bills(uploaded_files):
                     raise
 
                 if attempt < MAX_RETRIES:
+                    delay = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                    delay += random.uniform(0, 1)
                     st.warning(
-                        f"Google servers busy on {model_name}; retrying in 4 seconds... ({attempt}/{MAX_RETRIES})"
+                        f"Google servers busy on {model_name}; retrying in "
+                        f"{delay:.1f} seconds... ({attempt}/{MAX_RETRIES})"
                     )
-                    time.sleep(INITIAL_BACKOFF_SECONDS)
+                    time.sleep(delay)
                     continue
 
                 st.warning(f"Exhausted retries for {model_name}; trying the next available model.")
@@ -1058,6 +1064,12 @@ if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
     if billing_statement.empty:
         st.caption("No invoice entries are available for the billing statement.")
     else:
+        month_count = billing_statement["_bill_month"].nunique(dropna=False)
+        if month_count > 1:
+            st.caption(
+                "Invoices are exported to separate month tabs. The workbook opens "
+                "the tab containing the most entries first."
+            )
         st.dataframe(
             billing_statement[SUMMARY_COLUMNS],
             use_container_width=True,

@@ -4,3 +4,5 @@ pandas
 Pillow
 pypdf
 openpyxl
+rapidocr==3.9.2
+onnxruntime

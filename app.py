@@ -25,6 +25,7 @@ from freight_master import (
     normalize_loading_point,
     short_origin,
 )
+from local_ocr import extract_invoices
 
 # Streamlit Cloud can hot-reload this entrypoint while retaining an older
 # imported module in the worker process. Reload the local history module before
@@ -984,6 +985,13 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True,
 )
 
+processing_engine = st.radio(
+    "Processing engine",
+    ("Local OCR (no API)", "Gemini API"),
+    horizontal=True,
+    help="Local OCR runs inside the app. Gemini remains available as an optional fallback.",
+)
+
 if uploaded_files:
     file_count = len(uploaded_files)
     st.markdown(
@@ -1012,7 +1020,7 @@ if repeated_files:
     process_repeated_files = st.checkbox(
         "Process duplicate invoices anyway",
         key="process_duplicate_uploads_anyway",
-        help="Selected files will be sent to Gemini again and may use additional credits.",
+        help="Selected files will be extracted again using the chosen engine.",
     )
     if process_repeated_files:
         with st.expander("Select duplicate files to process", expanded=True):
@@ -1030,7 +1038,11 @@ if repeated_files:
 files_selected_for_processing = files_to_process + selected_repeated_files
 
 if st.button("Process Bills", disabled=not files_selected_for_processing):
-    with st.spinner("AI is analyzing documents..."):
+    with st.spinner(
+        "Reading invoices locally..."
+        if processing_engine == "Local OCR (no API)"
+        else "AI is analyzing documents..."
+    ):
         try:
             skipped_repeated_count = len(repeated_files) - len(selected_repeated_files)
             if skipped_repeated_count:
@@ -1039,16 +1051,38 @@ if st.button("Process Bills", disabled=not files_selected_for_processing):
                     "or repeated in this upload. No Gemini credits were used for them."
                 )
 
-            records, processed_files, failed_files = analyze_bills_resilient(
-                files_selected_for_processing
-            )
+            extraction_warnings = []
+            if processing_engine == "Local OCR (no API)":
+                master_data = load_customer_master()
+                customer_lookup = build_customer_lookup(master_data)
+                progress = st.progress(0, text="Starting local OCR...")
+
+                def update_progress(current, total, filename):
+                    progress.progress(current / total, text=f"Reading {current} of {total}: {filename}")
+
+                records, processed_files, extraction_warnings, failed_files = extract_invoices(
+                    files_selected_for_processing,
+                    progress_callback=update_progress,
+                    customer_codes=set(customer_lookup),
+                )
+                progress.empty()
+            else:
+                records, processed_files, failed_files = analyze_bills_resilient(
+                    files_selected_for_processing
+                )
+                master_data = load_customer_master()
+                customer_lookup = build_customer_lookup(master_data)
             if not processed_files:
+                if processing_engine == "Local OCR (no API)":
+                    detail = (
+                        f" {type(failed_files[0][1]).__name__}: {failed_files[0][1]}"
+                        if failed_files else ""
+                    )
+                    raise RuntimeError("Local OCR failed to start." + detail)
                 raise RuntimeError(
                     "Google could not process any bills right now because its models "
                     "are overloaded. No files were marked as processed; please retry shortly."
                 )
-            master_data = load_customer_master()
-            customer_lookup = build_customer_lookup(master_data)
             records = apply_customer_master_lookup(records, customer_lookup)
             records = apply_freight_lookup(records, build_freight_lookup(master_data))
             accepted_records, duplicates = store_new_invoice_records(

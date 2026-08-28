@@ -55,13 +55,13 @@ def test_analyze_bills_with_openai_uses_structured_responses(monkeypatch):
     assert captured["store"] is False
 
 
-def test_google_busy_exhausts_gemini_without_calling_openai(monkeypatch):
+def test_google_busy_switches_to_openai_immediately(monkeypatch):
     class BusyModels:
         def generate_content(self, **kwargs):
             raise RuntimeError("503 UNAVAILABLE: Google servers overloaded")
 
     monkeypatch.setattr(app, "API_KEY", "test-google-key")
-    monkeypatch.setattr(app, "MAX_RETRIES", 1)
+    monkeypatch.setattr(app, "OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setattr(
         app.genai,
         "Client",
@@ -69,19 +69,49 @@ def test_google_busy_exhausts_gemini_without_calling_openai(monkeypatch):
     )
     monkeypatch.setattr(app, "build_batch_content_parts", lambda files: [])
     monkeypatch.setattr(app.st, "warning", lambda message: None)
-    monkeypatch.setattr(app.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        app.time,
+        "sleep",
+        lambda seconds: (_ for _ in ()).throw(AssertionError("must not retry Gemini")),
+    )
     monkeypatch.setattr(
         app,
         "analyze_bills_with_openai",
-        lambda files: (_ for _ in ()).throw(AssertionError("must remain user-initiated")),
+        lambda files: [{"provider": "openai"}],
     )
 
-    try:
-        app.analyze_bills([SimpleNamespace(name="bill.jpeg")])
-    except RuntimeError as error:
-        assert "503" in str(error)
-    else:
-        raise AssertionError("Gemini failure should be returned to the UI")
+    assert app.analyze_bills([SimpleNamespace(name="bill.jpeg")]) == [
+        {"provider": "openai"}
+    ]
+
+
+def test_unavailable_gemini_model_switches_to_openai_immediately(monkeypatch):
+    requested_models = []
+
+    class MissingModels:
+        def generate_content(self, **kwargs):
+            requested_models.append(kwargs["model"])
+            raise RuntimeError("404 NOT_FOUND: model unavailable")
+
+    monkeypatch.setattr(app, "API_KEY", "test-google-key")
+    monkeypatch.setattr(app, "OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setattr(
+        app.genai,
+        "Client",
+        lambda **kwargs: SimpleNamespace(models=MissingModels()),
+    )
+    monkeypatch.setattr(app, "build_batch_content_parts", lambda files: [])
+    monkeypatch.setattr(app.st, "warning", lambda message: None)
+    monkeypatch.setattr(
+        app,
+        "analyze_bills_with_openai",
+        lambda files: [{"provider": "openai"}],
+    )
+
+    result = app.analyze_bills([SimpleNamespace(name="bill.jpeg")])
+
+    assert result == [{"provider": "openai"}]
+    assert requested_models == [app.MODEL_FALLBACKS[0]]
 
 
 def test_missing_google_key_does_not_automatically_use_openai(monkeypatch):

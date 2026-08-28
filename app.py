@@ -677,11 +677,26 @@ def analyze_bills(uploaded_files):
                 error_text = str(e).lower()
 
                 if "not_found" in error_text or "not found" in error_text:
+                    if OPENAI_API_KEY:
+                        st.warning(
+                            "Gemini is unavailable. Switching this batch to OpenAI now."
+                        )
+                        records = analyze_bills_with_openai(uploaded_files)
+                        st.session_state["last_processing_provider"] = "OpenAI"
+                        return records
                     st.warning(f"Model {model_name} unavailable; switching to next available model.")
                     break
 
                 if not is_retryable_error(e):
                     raise
+
+                if OPENAI_API_KEY:
+                    st.warning(
+                        "Google servers are busy. Switching this batch to OpenAI now."
+                    )
+                    records = analyze_bills_with_openai(uploaded_files)
+                    st.session_state["last_processing_provider"] = "OpenAI"
+                    return records
 
                 if attempt < MAX_RETRIES:
                     st.warning(
@@ -700,6 +715,7 @@ def analyze_bills(uploaded_files):
                 getattr(response, "usage_metadata", None),
                 DATABASE_PATH,
             )
+            st.session_state["last_processing_provider"] = "Gemini"
             return parse_gemini_response(response.text)
 
     if last_error is not None:
@@ -1144,7 +1160,7 @@ if st.button("Process Bills", disabled=not files_selected_for_processing):
     st.session_state.pop("openai_fallback_reason", None)
     st.session_state.pop("openai_bill_data", None)
     st.session_state.pop("openai_input_file_count", None)
-    with st.spinner("Gemini is analyzing documents..."):
+    with st.spinner("AI is analyzing documents..."):
         try:
             skipped_repeated_count = len(repeated_files) - len(selected_repeated_files)
             if skipped_repeated_count:
@@ -1180,6 +1196,7 @@ if openai_fallback_files:
         with st.spinner("OpenAI is analyzing the failed batch..."):
             try:
                 records = analyze_bills_with_openai(openai_fallback_files)
+                st.session_state["last_processing_provider"] = "OpenAI"
                 save_processing_result(records, openai_fallback_files)
                 st.session_state.pop("openai_fallback_files", None)
                 st.session_state.pop("openai_fallback_reason", None)
@@ -1236,7 +1253,10 @@ if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
         )
 
     last_processed_files = st.session_state.get("last_processed_files", [])
-    if last_processed_files:
+    if (
+        last_processed_files
+        and st.session_state.get("last_processing_provider") == "Gemini"
+    ):
         st.caption(
             "Want a second opinion? OpenAI will independently re-read every file and "
             "create a separate report below. Your Gemini result will remain unchanged."

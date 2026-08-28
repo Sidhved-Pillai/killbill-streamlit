@@ -1,3 +1,4 @@
+import base64
 import io
 import importlib
 import json
@@ -12,6 +13,7 @@ import pypdf
 import streamlit as st
 from google import genai
 from google.genai import types
+from openai import OpenAI
 from PIL import Image
 
 from customer_master import (
@@ -53,10 +55,14 @@ from billing_statement import (
 
 try:
     streamlit_api_key = st.secrets.get("GOOGLE_API_KEY", "")
+    streamlit_openai_api_key = st.secrets.get("OPENAI_API_KEY", "")
 except st.errors.StreamlitSecretNotFoundError:
     streamlit_api_key = ""
+    streamlit_openai_api_key = ""
 
 API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GENAI_API_KEY") or streamlit_api_key
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or streamlit_openai_api_key
+OPENAI_MODEL = "gpt-5.6"
 MODEL_FALLBACKS = [
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
@@ -520,6 +526,111 @@ def build_batch_content_parts(uploaded_files):
     return content_parts
 
 
+def build_openai_content(uploaded_files):
+    content = [
+        {
+            "type": "input_text",
+            "text": "Extract every distinct invoice trip row from all attached documents.",
+        }
+    ]
+    for uploaded_file in uploaded_files:
+        file_bytes = uploaded_file.getvalue()
+        extension = uploaded_file.name.rsplit(".", 1)[-1].lower()
+        mime_type = MIME_TYPES[extension]
+        encoded = base64.b64encode(file_bytes).decode("ascii")
+        content.append({"type": "input_text", "text": f"Document: {uploaded_file.name}"})
+        if extension == "pdf":
+            content.append(
+                {
+                    "type": "input_file",
+                    "filename": uploaded_file.name,
+                    "file_data": f"data:{mime_type};base64,{encoded}",
+                }
+            )
+        else:
+            content.append(
+                {
+                    "type": "input_image",
+                    "image_url": f"data:{mime_type};base64,{encoded}",
+                    "detail": "original",
+                }
+            )
+    return content
+
+
+OPENAI_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "records": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "Date": {"type": "string"},
+                    "Invoice No.": {"type": "string"},
+                    "Vehicle No.": {"type": "string"},
+                    "From": {"type": "string"},
+                    "Loading Point": {"type": ["string", "null"]},
+                    "Customer Code": {"type": "string"},
+                    "Customer Name": {"type": "string"},
+                    "To": {"type": "string"},
+                    "Vehicle Type": {"type": "string"},
+                    "Case": {"type": "number"},
+                    "Jar": {"type": "number"},
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "description": {"type": "string"},
+                                "qty": {"type": ["number", "string"]},
+                            },
+                            "required": ["description", "qty"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": [
+                    "Date", "Invoice No.", "Vehicle No.", "From", "Loading Point",
+                    "Customer Code", "Customer Name", "To", "Vehicle Type", "Case",
+                    "Jar", "items",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["records"],
+    "additionalProperties": False,
+}
+
+
+def analyze_bills_with_openai(uploaded_files):
+    if not OPENAI_API_KEY:
+        raise ValueError(
+            "Gemini produced no result and OPENAI_API_KEY is not configured."
+        )
+
+    response = OpenAI(api_key=OPENAI_API_KEY, timeout=180.0).responses.create(
+        model=OPENAI_MODEL,
+        instructions=SYSTEM_INSTRUCTION,
+        input=[{"role": "user", "content": build_openai_content(uploaded_files)}],
+        reasoning={"effort": "medium"},
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "invoice_trip_rows",
+                "strict": True,
+                "schema": OPENAI_RESPONSE_SCHEMA,
+            }
+        },
+        store=False,
+    )
+    records = parse_gemini_response(response.output_text)
+    if not records:
+        raise ValueError("OpenAI also returned no invoice records for this batch.")
+    return records
+
+
 def is_retryable_error(error):
     error_text = f"{type(error).__name__}: {error}".lower()
     retry_tokens = [
@@ -568,7 +679,11 @@ def analyze_bills(uploaded_files):
                     break
 
                 if not is_retryable_error(e):
-                    raise
+                    st.warning(
+                        f"Gemini could not produce a result on {model_name}; "
+                        "trying the next available model."
+                    )
+                    break
 
                 if attempt < MAX_RETRIES:
                     st.warning(
@@ -587,7 +702,26 @@ def analyze_bills(uploaded_files):
                 getattr(response, "usage_metadata", None),
                 DATABASE_PATH,
             )
-            return parse_gemini_response(response.text)
+            try:
+                records = parse_gemini_response(response.text)
+            except (json.JSONDecodeError, TypeError, ValueError) as error:
+                last_error = error
+                st.warning(
+                    f"Gemini returned no usable result on {model_name}; trying the next model."
+                )
+                break
+            if records:
+                return records
+            last_error = ValueError(f"Gemini model {model_name} returned zero records.")
+            st.warning(f"Gemini returned no records on {model_name}; trying the next model.")
+            break
+
+    if OPENAI_API_KEY:
+        st.warning(
+            "Gemini could not produce a result with any available model. "
+            "Switching this batch to OpenAI."
+        )
+        return analyze_bills_with_openai(uploaded_files)
 
     if last_error is not None:
         raise last_error

@@ -66,7 +66,7 @@ API_KEY = (
     or streamlit_google_api_key
 )
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or streamlit_openai_api_key
-OPENAI_MODEL = "gpt-5.6-terra"
+OPENAI_MODEL = "gpt-5.6"
 MODEL_FALLBACKS = [
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
@@ -563,10 +563,13 @@ def build_openai_content(uploaded_files):
 
 
 OPENAI_RESPONSE_SCHEMA = {
-    "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {
+    "type": "object",
+    "properties": {
+        "records": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
             "Date": {"type": "string"},
             "Invoice No.": {"type": "string"},
             "Vehicle No.": {"type": "string"},
@@ -578,26 +581,30 @@ OPENAI_RESPONSE_SCHEMA = {
             "Vehicle Type": {"type": "string"},
             "Case": {"type": "number"},
             "Jar": {"type": "number"},
-            "items": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "description": {"type": "string"},
-                        "qty": {"type": ["number", "string"]},
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "description": {"type": "string"},
+                                "qty": {"type": ["number", "string"]},
+                            },
+                            "required": ["description", "qty"],
+                            "additionalProperties": False,
+                        },
                     },
-                    "required": ["description", "qty"],
-                    "additionalProperties": False,
                 },
+                "required": [
+                    "Date", "Invoice No.", "Vehicle No.", "From", "Loading Point",
+                    "Customer Code", "Customer Name", "To", "Vehicle Type", "Case",
+                    "Jar", "items",
+                ],
+                "additionalProperties": False,
             },
         },
-        "required": [
-            "Date", "Invoice No.", "Vehicle No.", "From", "Loading Point",
-            "Customer Code", "Customer Name", "To", "Vehicle Type", "Case",
-            "Jar", "items",
-        ],
-        "additionalProperties": False,
     },
+    "required": ["records"],
+    "additionalProperties": False,
 }
 
 
@@ -612,7 +619,7 @@ def analyze_bills_with_openai(uploaded_files):
         model=OPENAI_MODEL,
         instructions=SYSTEM_INSTRUCTION,
         input=[{"role": "user", "content": build_openai_content(uploaded_files)}],
-        reasoning={"effort": "low"},
+        reasoning={"effort": "medium"},
         text={
             "format": {
                 "type": "json_schema",
@@ -646,13 +653,9 @@ def is_retryable_error(error):
 
 
 def analyze_bills(uploaded_files):
-    if not API_KEY and OPENAI_API_KEY:
-        st.info("Google API is not configured; processing this batch with OpenAI.")
-        return analyze_bills_with_openai(uploaded_files)
-
     if not API_KEY:
         raise ValueError(
-            "Missing API key. Add GOOGLE_API_KEY or OPENAI_API_KEY to Streamlit secrets."
+            "Google API is not configured. Add GOOGLE_API_KEY to Streamlit secrets."
         )
 
     client = genai.Client(api_key=API_KEY)
@@ -680,12 +683,6 @@ def analyze_bills(uploaded_files):
                 if not is_retryable_error(e):
                     raise
 
-                if OPENAI_API_KEY:
-                    st.warning(
-                        "Google is busy or unavailable; switching this batch to OpenAI now."
-                    )
-                    return analyze_bills_with_openai(uploaded_files)
-
                 if attempt < MAX_RETRIES:
                     st.warning(
                         f"Google servers busy on {model_name}; retrying in 4 seconds... ({attempt}/{MAX_RETRIES})"
@@ -704,10 +701,6 @@ def analyze_bills(uploaded_files):
                 DATABASE_PATH,
             )
             return parse_gemini_response(response.text)
-
-    if OPENAI_API_KEY:
-        st.warning("No Gemini model is available; switching this batch to OpenAI.")
-        return analyze_bills_with_openai(uploaded_files)
 
     if last_error is not None:
         raise last_error
@@ -982,6 +975,33 @@ def render_processing_summary(database_path):
         show_duplicate_invoice_dialog(database_path)
 
 
+def save_processing_result(records, processed_files):
+    master_data = load_customer_master()
+    customer_lookup = build_customer_lookup(master_data)
+    records = apply_customer_master_lookup(records, customer_lookup)
+    records = apply_freight_lookup(records, build_freight_lookup(master_data))
+    accepted_records, duplicates = store_new_invoice_records(
+        records,
+        DATABASE_PATH,
+    )
+    store_processed_uploads(processed_files, DATABASE_PATH)
+    for accepted_record in accepted_records:
+        log_processed_invoice(
+            accepted_record.get(
+                "Invoice No.",
+                accepted_record.get("Invoice No", ""),
+            ),
+            DATABASE_PATH,
+        )
+    st.session_state["bill_data"] = pd.DataFrame(
+        accepted_records,
+        columns=COLUMNS,
+    )
+    st.session_state["processing_new_count"] = len(accepted_records)
+    st.session_state["duplicate_invoices"] = duplicates
+    st.session_state["show_duplicate_invoice_details"] = False
+
+
 st.set_page_config(
     page_title="Project Kill Bill",
     page_icon="",
@@ -1113,7 +1133,9 @@ if repeated_files:
 files_selected_for_processing = files_to_process + selected_repeated_files
 
 if st.button("Process Bills", disabled=not files_selected_for_processing):
-    with st.spinner("AI is analyzing documents..."):
+    st.session_state.pop("openai_fallback_files", None)
+    st.session_state.pop("openai_fallback_reason", None)
+    with st.spinner("Gemini is analyzing documents..."):
         try:
             skipped_repeated_count = len(repeated_files) - len(selected_repeated_files)
             if skipped_repeated_count:
@@ -1123,34 +1145,38 @@ if st.button("Process Bills", disabled=not files_selected_for_processing):
                 )
 
             records = analyze_bills(files_selected_for_processing)
-            master_data = load_customer_master()
-            customer_lookup = build_customer_lookup(master_data)
-            records = apply_customer_master_lookup(records, customer_lookup)
-            records = apply_freight_lookup(records, build_freight_lookup(master_data))
-            accepted_records, duplicates = store_new_invoice_records(
-                records,
-                DATABASE_PATH,
-            )
-            store_processed_uploads(files_selected_for_processing, DATABASE_PATH)
-            for accepted_record in accepted_records:
-                log_processed_invoice(
-                    accepted_record.get(
-                        "Invoice No.",
-                        accepted_record.get("Invoice No", ""),
-                    ),
-                    DATABASE_PATH,
-                )
-            st.session_state["bill_data"] = pd.DataFrame(
-                accepted_records,
-                columns=COLUMNS,
-            )
-            st.session_state["processing_new_count"] = len(accepted_records)
-            st.session_state["duplicate_invoices"] = duplicates
-            st.session_state["show_duplicate_invoice_details"] = False
-        except json.JSONDecodeError:
-            st.error("Gemini returned invalid JSON. Please try processing again.")
+            save_processing_result(records, files_selected_for_processing)
+        except json.JSONDecodeError as error:
+            st.session_state["openai_fallback_files"] = files_selected_for_processing
+            st.session_state["openai_fallback_reason"] = str(error)
+            st.error("Gemini returned an unreadable result for this batch.")
         except Exception as error:
-            st.error(f"Failed to process bills: {error}")
+            st.session_state["openai_fallback_files"] = files_selected_for_processing
+            st.session_state["openai_fallback_reason"] = str(error)
+            st.error("Gemini could not complete this batch.")
+
+openai_fallback_files = st.session_state.get("openai_fallback_files", [])
+if openai_fallback_files:
+    st.warning(
+        "Gemini did not generate a usable result. You can retry this same batch "
+        "with OpenAI. OpenAI usage will be billed to your OpenAI account."
+    )
+    if not OPENAI_API_KEY:
+        st.error("Add OPENAI_API_KEY to Streamlit secrets to enable the fallback.")
+    elif st.button(
+        "Use OpenAI for this batch",
+        key="use_openai_for_failed_batch",
+        type="primary",
+    ):
+        with st.spinner("OpenAI is analyzing the failed batch..."):
+            try:
+                records = analyze_bills_with_openai(openai_fallback_files)
+                save_processing_result(records, openai_fallback_files)
+                st.session_state.pop("openai_fallback_files", None)
+                st.session_state.pop("openai_fallback_reason", None)
+                st.success("OpenAI completed the batch successfully.")
+            except Exception as error:
+                st.error(f"OpenAI could not complete this batch: {error}")
 
 render_processing_summary(DATABASE_PATH)
 

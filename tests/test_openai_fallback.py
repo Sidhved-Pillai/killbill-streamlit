@@ -19,6 +19,15 @@ def test_openai_content_embeds_images_without_writing_files():
     assert content[2]["detail"] == "original"
 
 
+def test_openai_object_wrapper_is_parsed_into_records():
+    parsed = app.parse_gemini_response(
+        '{"records":[{"Invoice No.":"INV-1","items":[]}]}'
+    )
+
+    assert len(parsed) == 1
+    assert parsed[0]["Invoice No."] == "INV-1"
+
+
 def test_analyze_bills_with_openai_uses_structured_responses(monkeypatch):
     captured = {}
 

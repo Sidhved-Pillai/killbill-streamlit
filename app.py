@@ -975,7 +975,7 @@ def render_processing_summary(database_path):
         show_duplicate_invoice_dialog(database_path)
 
 
-def save_processing_result(records, processed_files):
+def save_processing_result(records, processed_files, display_all_records=False):
     master_data = load_customer_master()
     customer_lookup = build_customer_lookup(master_data)
     records = apply_customer_master_lookup(records, customer_lookup)
@@ -993,13 +993,17 @@ def save_processing_result(records, processed_files):
             ),
             DATABASE_PATH,
         )
+    displayed_records = records if display_all_records else accepted_records
     st.session_state["bill_data"] = pd.DataFrame(
-        accepted_records,
+        displayed_records,
         columns=COLUMNS,
     )
-    st.session_state["processing_new_count"] = len(accepted_records)
-    st.session_state["duplicate_invoices"] = duplicates
+    st.session_state["processing_new_count"] = len(displayed_records)
+    st.session_state["duplicate_invoices"] = [] if display_all_records else duplicates
     st.session_state["show_duplicate_invoice_details"] = False
+    st.session_state["last_processed_files"] = list(processed_files)
+    st.session_state["last_input_file_count"] = len(processed_files)
+    st.session_state["last_result_record_count"] = len(records)
 
 
 st.set_page_config(
@@ -1180,6 +1184,15 @@ if openai_fallback_files:
 
 render_processing_summary(DATABASE_PATH)
 
+input_file_count = st.session_state.get("last_input_file_count", 0)
+result_record_count = st.session_state.get("last_result_record_count", 0)
+if input_file_count and result_record_count < input_file_count:
+    st.warning(
+        f"The AI returned {result_record_count} invoice row(s) from {input_file_count} "
+        "uploaded file(s). Some files may be additional pages, but one or more invoices "
+        "may also have been missed. You can rerun the complete batch with OpenAI below."
+    )
+
 if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
     st.subheader("Review & Edit Extracted Data")
 
@@ -1216,3 +1229,32 @@ if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             file_name=billing_statement_filename(billing_statement),
         )
+
+    last_processed_files = st.session_state.get("last_processed_files", [])
+    if last_processed_files:
+        st.caption(
+            "Want a second extraction? OpenAI will re-read every file in this batch and "
+            "replace the result currently shown on this page."
+        )
+        if not OPENAI_API_KEY:
+            st.error("Add OPENAI_API_KEY to Streamlit secrets to enable the OpenAI rerun.")
+        elif st.button(
+            "Use OpenAI for this batch",
+            key="use_openai_for_completed_batch",
+            type="secondary",
+        ):
+            with st.spinner("OpenAI is re-reading the complete batch..."):
+                try:
+                    records = analyze_bills_with_openai(last_processed_files)
+                    save_processing_result(
+                        records,
+                        last_processed_files,
+                        display_all_records=True,
+                    )
+                    st.session_state["openai_rerun_completed"] = True
+                    st.rerun()
+                except Exception as error:
+                    st.error(f"OpenAI could not complete this batch: {error}")
+
+if st.session_state.pop("openai_rerun_completed", False):
+    st.success("OpenAI completed the batch and replaced the displayed result.")

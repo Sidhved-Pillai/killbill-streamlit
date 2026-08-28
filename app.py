@@ -975,11 +975,15 @@ def render_processing_summary(database_path):
         show_duplicate_invoice_dialog(database_path)
 
 
-def save_processing_result(records, processed_files, display_all_records=False):
+def enrich_extracted_records(records):
     master_data = load_customer_master()
     customer_lookup = build_customer_lookup(master_data)
     records = apply_customer_master_lookup(records, customer_lookup)
-    records = apply_freight_lookup(records, build_freight_lookup(master_data))
+    return apply_freight_lookup(records, build_freight_lookup(master_data))
+
+
+def save_processing_result(records, processed_files):
+    records = enrich_extracted_records(records)
     accepted_records, duplicates = store_new_invoice_records(
         records,
         DATABASE_PATH,
@@ -993,13 +997,12 @@ def save_processing_result(records, processed_files, display_all_records=False):
             ),
             DATABASE_PATH,
         )
-    displayed_records = records if display_all_records else accepted_records
     st.session_state["bill_data"] = pd.DataFrame(
-        displayed_records,
+        accepted_records,
         columns=COLUMNS,
     )
-    st.session_state["processing_new_count"] = len(displayed_records)
-    st.session_state["duplicate_invoices"] = [] if display_all_records else duplicates
+    st.session_state["processing_new_count"] = len(accepted_records)
+    st.session_state["duplicate_invoices"] = duplicates
     st.session_state["show_duplicate_invoice_details"] = False
     st.session_state["last_processed_files"] = list(processed_files)
     st.session_state["last_input_file_count"] = len(processed_files)
@@ -1139,6 +1142,8 @@ files_selected_for_processing = files_to_process + selected_repeated_files
 if st.button("Process Bills", disabled=not files_selected_for_processing):
     st.session_state.pop("openai_fallback_files", None)
     st.session_state.pop("openai_fallback_reason", None)
+    st.session_state.pop("openai_bill_data", None)
+    st.session_state.pop("openai_input_file_count", None)
     with st.spinner("Gemini is analyzing documents..."):
         try:
             skipped_repeated_count = len(repeated_files) - len(selected_repeated_files)
@@ -1233,8 +1238,8 @@ if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
     last_processed_files = st.session_state.get("last_processed_files", [])
     if last_processed_files:
         st.caption(
-            "Want a second extraction? OpenAI will re-read every file in this batch and "
-            "replace the result currently shown on this page."
+            "Want a second opinion? OpenAI will independently re-read every file and "
+            "create a separate report below. Your Gemini result will remain unchanged."
         )
         if not OPENAI_API_KEY:
             st.error("Add OPENAI_API_KEY to Streamlit secrets to enable the OpenAI rerun.")
@@ -1246,15 +1251,65 @@ if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
             with st.spinner("OpenAI is re-reading the complete batch..."):
                 try:
                     records = analyze_bills_with_openai(last_processed_files)
-                    save_processing_result(
+                    records = enrich_extracted_records(records)
+                    st.session_state["openai_bill_data"] = pd.DataFrame(
                         records,
-                        last_processed_files,
-                        display_all_records=True,
+                        columns=COLUMNS,
                     )
-                    st.session_state["openai_rerun_completed"] = True
+                    st.session_state["openai_input_file_count"] = len(
+                        last_processed_files
+                    )
                     st.rerun()
                 except Exception as error:
                     st.error(f"OpenAI could not complete this batch: {error}")
 
-if st.session_state.pop("openai_rerun_completed", False):
-    st.success("OpenAI completed the batch and replaced the displayed result.")
+if "openai_bill_data" in st.session_state and not st.session_state["openai_bill_data"].empty:
+    st.divider()
+    st.subheader("OpenAI Independent Result")
+    st.caption(
+        "This is a separate extraction of the same uploaded files. It has not replaced "
+        "or altered the Gemini result above. Review differences before choosing a report."
+    )
+
+    openai_input_count = st.session_state.get("openai_input_file_count", 0)
+    openai_result_count = len(st.session_state["openai_bill_data"])
+    if openai_input_count and openai_result_count < openai_input_count:
+        st.warning(
+            f"OpenAI returned {openai_result_count} invoice row(s) from "
+            f"{openai_input_count} uploaded file(s). Some files may be additional pages, "
+            "but verify that no invoice was missed."
+        )
+
+    openai_edited_df = st.data_editor(
+        st.session_state["openai_bill_data"],
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        key="openai_result_editor",
+    )
+    st.session_state["openai_bill_data"] = openai_edited_df
+
+    st.download_button(
+        label="Download OpenAI Excel",
+        data=build_excel_workbook(openai_edited_df),
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        file_name=f"openai_{excel_export_filename()}",
+    )
+
+    st.subheader("OpenAI Billing Statement")
+    openai_billing_statement = build_billing_statement(openai_edited_df)
+    if openai_billing_statement.empty:
+        st.caption("No invoice entries are available in the OpenAI billing statement.")
+    else:
+        st.dataframe(
+            openai_billing_statement[SUMMARY_COLUMNS],
+            use_container_width=True,
+            hide_index=True,
+            height=360,
+        )
+        st.download_button(
+            label="Download OpenAI Billing Statement",
+            data=build_billing_statement_workbook(openai_billing_statement),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            file_name=f"openai_{billing_statement_filename(openai_billing_statement)}",
+        )

@@ -70,6 +70,7 @@ MODEL_FALLBACKS = [
 ]
 MAX_RETRIES = 2
 INITIAL_BACKOFF_SECONDS = 4
+GEMINI_TOTAL_TIMEOUT_SECONDS = 60
 DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "billing_history.db")
 
 PREMIUM_CSS = """
@@ -656,18 +657,37 @@ def analyze_bills(uploaded_files):
             "Missing API key. Set GOOGLE_API_KEY in the environment or add it to Streamlit secrets."
         )
 
+    gemini_started_at = time.monotonic()
+    gemini_deadline = gemini_started_at + GEMINI_TOTAL_TIMEOUT_SECONDS
     client = genai.Client(api_key=API_KEY)
     content_parts = build_batch_content_parts(uploaded_files)
 
     last_error = None
     for model_name in MODEL_FALLBACKS:
         for attempt in range(1, MAX_RETRIES + 1):
+            remaining_seconds = gemini_deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                last_error = TimeoutError(
+                    f"Gemini exceeded the {GEMINI_TOTAL_TIMEOUT_SECONDS}-second limit."
+                )
+                break
             try:
                 response = client.models.generate_content(
                     model=model_name,
                     contents=content_parts,
-                    config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION),
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION,
+                        http_options=types.HttpOptions(
+                            timeout=max(1, int(remaining_seconds * 1000)),
+                            retry_options=types.HttpRetryOptions(attempts=1),
+                        ),
+                    ),
                 )
+                if time.monotonic() >= gemini_deadline:
+                    last_error = TimeoutError(
+                        f"Gemini exceeded the {GEMINI_TOTAL_TIMEOUT_SECONDS}-second limit."
+                    )
+                    break
                 print("DEBUG raw Gemini response before parse_gemini_response:")
                 print(response.text)
             except Exception as e:
@@ -686,10 +706,13 @@ def analyze_bills(uploaded_files):
                     break
 
                 if attempt < MAX_RETRIES:
+                    remaining_seconds = gemini_deadline - time.monotonic()
+                    if remaining_seconds <= 0:
+                        break
                     st.warning(
                         f"Google servers busy on {model_name}; retrying in 4 seconds... ({attempt}/{MAX_RETRIES})"
                     )
-                    time.sleep(INITIAL_BACKOFF_SECONDS)
+                    time.sleep(min(INITIAL_BACKOFF_SECONDS, remaining_seconds))
                     continue
 
                 st.warning(f"Exhausted retries for {model_name}; trying the next available model.")
@@ -716,11 +739,19 @@ def analyze_bills(uploaded_files):
             st.warning(f"Gemini returned no records on {model_name}; trying the next model.")
             break
 
+        if time.monotonic() >= gemini_deadline:
+            break
+
     if OPENAI_API_KEY:
-        st.warning(
-            "Gemini could not produce a result with any available model. "
-            "Switching this batch to OpenAI."
-        )
+        if isinstance(last_error, TimeoutError):
+            st.warning(
+                "Gemini did not finish within 1 minute. Switching this batch to OpenAI."
+            )
+        else:
+            st.warning(
+                "Gemini could not produce a result with any available model. "
+                "Switching this batch to OpenAI."
+            )
         return analyze_bills_with_openai(uploaded_files)
 
     if last_error is not None:

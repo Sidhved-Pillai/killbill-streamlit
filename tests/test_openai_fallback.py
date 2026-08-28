@@ -97,3 +97,31 @@ def test_zero_record_gemini_responses_eventually_use_openai(monkeypatch):
 def test_openai_schema_has_required_object_root():
     assert app.OPENAI_RESPONSE_SCHEMA["type"] == "object"
     assert "records" in app.OPENAI_RESPONSE_SCHEMA["properties"]
+
+
+def test_one_minute_gemini_deadline_switches_to_openai(monkeypatch):
+    monkeypatch.setattr(app, "API_KEY", "google-key")
+    monkeypatch.setattr(app, "OPENAI_API_KEY", "openai-key")
+    monkeypatch.setattr(app.time, "monotonic", iter([0.0, 61.0, 61.0]).__next__)
+    monkeypatch.setattr(
+        app.genai,
+        "Client",
+        lambda **kwargs: SimpleNamespace(
+            models=SimpleNamespace(
+                generate_content=lambda **call_kwargs: (_ for _ in ()).throw(
+                    AssertionError("Gemini must not start after the deadline")
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(app, "build_batch_content_parts", lambda files: [])
+    monkeypatch.setattr(app.st, "warning", lambda message: None)
+    monkeypatch.setattr(
+        app,
+        "analyze_bills_with_openai",
+        lambda files: [{"provider": "openai"}],
+    )
+
+    assert app.analyze_bills([SimpleNamespace(name="bill.jpeg")]) == [
+        {"provider": "openai"}
+    ]

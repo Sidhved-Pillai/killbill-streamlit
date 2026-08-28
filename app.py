@@ -681,9 +681,7 @@ def analyze_bills(uploaded_files):
                         st.warning(
                             "Gemini is unavailable. Switching this batch to OpenAI now."
                         )
-                        records = analyze_bills_with_openai(uploaded_files)
-                        st.session_state["last_processing_provider"] = "OpenAI"
-                        return records
+                        return analyze_bills_with_openai(uploaded_files)
                     st.warning(f"Model {model_name} unavailable; switching to next available model.")
                     break
 
@@ -694,9 +692,7 @@ def analyze_bills(uploaded_files):
                     st.warning(
                         "Google servers are busy. Switching this batch to OpenAI now."
                     )
-                    records = analyze_bills_with_openai(uploaded_files)
-                    st.session_state["last_processing_provider"] = "OpenAI"
-                    return records
+                    return analyze_bills_with_openai(uploaded_files)
 
                 if attempt < MAX_RETRIES:
                     st.warning(
@@ -715,7 +711,6 @@ def analyze_bills(uploaded_files):
                 getattr(response, "usage_metadata", None),
                 DATABASE_PATH,
             )
-            st.session_state["last_processing_provider"] = "Gemini"
             return parse_gemini_response(response.text)
 
     if last_error is not None:
@@ -1020,7 +1015,6 @@ def save_processing_result(records, processed_files):
     st.session_state["processing_new_count"] = len(accepted_records)
     st.session_state["duplicate_invoices"] = duplicates
     st.session_state["show_duplicate_invoice_details"] = False
-    st.session_state["last_processed_files"] = list(processed_files)
     st.session_state["last_input_file_count"] = len(processed_files)
     st.session_state["last_result_record_count"] = len(records)
 
@@ -1156,10 +1150,6 @@ if repeated_files:
 files_selected_for_processing = files_to_process + selected_repeated_files
 
 if st.button("Process Bills", disabled=not files_selected_for_processing):
-    st.session_state.pop("openai_fallback_files", None)
-    st.session_state.pop("openai_fallback_reason", None)
-    st.session_state.pop("openai_bill_data", None)
-    st.session_state.pop("openai_input_file_count", None)
     with st.spinner("AI is analyzing documents..."):
         try:
             skipped_repeated_count = len(repeated_files) - len(selected_repeated_files)
@@ -1171,38 +1161,10 @@ if st.button("Process Bills", disabled=not files_selected_for_processing):
 
             records = analyze_bills(files_selected_for_processing)
             save_processing_result(records, files_selected_for_processing)
-        except json.JSONDecodeError as error:
-            st.session_state["openai_fallback_files"] = files_selected_for_processing
-            st.session_state["openai_fallback_reason"] = str(error)
-            st.error("Gemini returned an unreadable result for this batch.")
+        except json.JSONDecodeError:
+            st.error("The AI returned an unreadable result. Please process the batch again.")
         except Exception as error:
-            st.session_state["openai_fallback_files"] = files_selected_for_processing
-            st.session_state["openai_fallback_reason"] = str(error)
-            st.error("Gemini could not complete this batch.")
-
-openai_fallback_files = st.session_state.get("openai_fallback_files", [])
-if openai_fallback_files:
-    st.warning(
-        "Gemini did not generate a usable result. You can retry this same batch "
-        "with OpenAI. OpenAI usage will be billed to your OpenAI account."
-    )
-    if not OPENAI_API_KEY:
-        st.error("Add OPENAI_API_KEY to Streamlit secrets to enable the fallback.")
-    elif st.button(
-        "Use OpenAI for this batch",
-        key="use_openai_for_failed_batch",
-        type="primary",
-    ):
-        with st.spinner("OpenAI is analyzing the failed batch..."):
-            try:
-                records = analyze_bills_with_openai(openai_fallback_files)
-                st.session_state["last_processing_provider"] = "OpenAI"
-                save_processing_result(records, openai_fallback_files)
-                st.session_state.pop("openai_fallback_files", None)
-                st.session_state.pop("openai_fallback_reason", None)
-                st.success("OpenAI completed the batch successfully.")
-            except Exception as error:
-                st.error(f"OpenAI could not complete this batch: {error}")
+            st.error(f"The AI could not complete this batch: {error}")
 
 render_processing_summary(DATABASE_PATH)
 
@@ -1212,7 +1174,7 @@ if input_file_count and result_record_count < input_file_count:
     st.warning(
         f"The AI returned {result_record_count} invoice row(s) from {input_file_count} "
         "uploaded file(s). Some files may be additional pages, but one or more invoices "
-        "may also have been missed. You can rerun the complete batch with OpenAI below."
+        "may also have been missed. Please verify the extracted rows before downloading."
     )
 
 if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
@@ -1250,86 +1212,4 @@ if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
             data=build_billing_statement_workbook(billing_statement),
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             file_name=billing_statement_filename(billing_statement),
-        )
-
-    last_processed_files = st.session_state.get("last_processed_files", [])
-    if (
-        last_processed_files
-        and st.session_state.get("last_processing_provider") == "Gemini"
-    ):
-        st.caption(
-            "Want a second opinion? OpenAI will independently re-read every file and "
-            "create a separate report below. Your Gemini result will remain unchanged."
-        )
-        if not OPENAI_API_KEY:
-            st.error("Add OPENAI_API_KEY to Streamlit secrets to enable the OpenAI rerun.")
-        elif st.button(
-            "Use OpenAI for this batch",
-            key="use_openai_for_completed_batch",
-            type="secondary",
-        ):
-            with st.spinner("OpenAI is re-reading the complete batch..."):
-                try:
-                    records = analyze_bills_with_openai(last_processed_files)
-                    records = enrich_extracted_records(records)
-                    st.session_state["openai_bill_data"] = pd.DataFrame(
-                        records,
-                        columns=COLUMNS,
-                    )
-                    st.session_state["openai_input_file_count"] = len(
-                        last_processed_files
-                    )
-                    st.rerun()
-                except Exception as error:
-                    st.error(f"OpenAI could not complete this batch: {error}")
-
-if "openai_bill_data" in st.session_state and not st.session_state["openai_bill_data"].empty:
-    st.divider()
-    st.subheader("OpenAI Independent Result")
-    st.caption(
-        "This is a separate extraction of the same uploaded files. It has not replaced "
-        "or altered the Gemini result above. Review differences before choosing a report."
-    )
-
-    openai_input_count = st.session_state.get("openai_input_file_count", 0)
-    openai_result_count = len(st.session_state["openai_bill_data"])
-    if openai_input_count and openai_result_count < openai_input_count:
-        st.warning(
-            f"OpenAI returned {openai_result_count} invoice row(s) from "
-            f"{openai_input_count} uploaded file(s). Some files may be additional pages, "
-            "but verify that no invoice was missed."
-        )
-
-    openai_edited_df = st.data_editor(
-        st.session_state["openai_bill_data"],
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        key="openai_result_editor",
-    )
-    st.session_state["openai_bill_data"] = openai_edited_df
-
-    st.download_button(
-        label="Download OpenAI Excel",
-        data=build_excel_workbook(openai_edited_df),
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        file_name=f"openai_{excel_export_filename()}",
-    )
-
-    st.subheader("OpenAI Billing Statement")
-    openai_billing_statement = build_billing_statement(openai_edited_df)
-    if openai_billing_statement.empty:
-        st.caption("No invoice entries are available in the OpenAI billing statement.")
-    else:
-        st.dataframe(
-            openai_billing_statement[SUMMARY_COLUMNS],
-            use_container_width=True,
-            hide_index=True,
-            height=360,
-        )
-        st.download_button(
-            label="Download OpenAI Billing Statement",
-            data=build_billing_statement_workbook(openai_billing_statement),
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            file_name=f"openai_{billing_statement_filename(openai_billing_statement)}",
         )

@@ -1,4 +1,3 @@
-import base64
 import io
 import importlib
 import json
@@ -13,7 +12,6 @@ import pypdf
 import streamlit as st
 from google import genai
 from google.genai import types
-from openai import OpenAI
 from PIL import Image
 
 from customer_master import (
@@ -54,19 +52,11 @@ from billing_statement import (
 )
 
 try:
-    streamlit_google_api_key = st.secrets.get("GOOGLE_API_KEY", "")
-    streamlit_openai_api_key = st.secrets.get("OPENAI_API_KEY", "")
+    streamlit_api_key = st.secrets.get("GOOGLE_API_KEY", "")
 except st.errors.StreamlitSecretNotFoundError:
-    streamlit_google_api_key = ""
-    streamlit_openai_api_key = ""
+    streamlit_api_key = ""
 
-API_KEY = (
-    os.getenv("GOOGLE_API_KEY")
-    or os.getenv("GENAI_API_KEY")
-    or streamlit_google_api_key
-)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or streamlit_openai_api_key
-OPENAI_MODEL = "gpt-5.6"
+API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GENAI_API_KEY") or streamlit_api_key
 MODEL_FALLBACKS = [
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
@@ -530,109 +520,6 @@ def build_batch_content_parts(uploaded_files):
     return content_parts
 
 
-def build_openai_content(uploaded_files):
-    content = [
-        {
-            "type": "input_text",
-            "text": "Extract every distinct invoice trip row from all attached documents.",
-        }
-    ]
-    for uploaded_file in uploaded_files:
-        file_bytes = uploaded_file.getvalue()
-        extension = uploaded_file.name.rsplit(".", 1)[-1].lower()
-        mime_type = MIME_TYPES[extension]
-        encoded = base64.b64encode(file_bytes).decode("ascii")
-        content.append({"type": "input_text", "text": f"Document: {uploaded_file.name}"})
-        if extension == "pdf":
-            content.append(
-                {
-                    "type": "input_file",
-                    "filename": uploaded_file.name,
-                    "file_data": f"data:{mime_type};base64,{encoded}",
-                }
-            )
-        else:
-            content.append(
-                {
-                    "type": "input_image",
-                    "image_url": f"data:{mime_type};base64,{encoded}",
-                    "detail": "original",
-                }
-            )
-    return content
-
-
-OPENAI_RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "records": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-            "Date": {"type": "string"},
-            "Invoice No.": {"type": "string"},
-            "Vehicle No.": {"type": "string"},
-            "From": {"type": "string"},
-            "Loading Point": {"type": ["string", "null"]},
-            "Customer Code": {"type": "string"},
-            "Customer Name": {"type": "string"},
-            "To": {"type": "string"},
-            "Vehicle Type": {"type": "string"},
-            "Case": {"type": "number"},
-            "Jar": {"type": "number"},
-                    "items": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "description": {"type": "string"},
-                                "qty": {"type": ["number", "string"]},
-                            },
-                            "required": ["description", "qty"],
-                            "additionalProperties": False,
-                        },
-                    },
-                },
-                "required": [
-                    "Date", "Invoice No.", "Vehicle No.", "From", "Loading Point",
-                    "Customer Code", "Customer Name", "To", "Vehicle Type", "Case",
-                    "Jar", "items",
-                ],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["records"],
-    "additionalProperties": False,
-}
-
-
-def analyze_bills_with_openai(uploaded_files):
-    if not OPENAI_API_KEY:
-        raise ValueError(
-            "OpenAI fallback is not configured. Add OPENAI_API_KEY to Streamlit secrets."
-        )
-
-    client = OpenAI(api_key=OPENAI_API_KEY, timeout=180.0)
-    response = client.responses.create(
-        model=OPENAI_MODEL,
-        instructions=SYSTEM_INSTRUCTION,
-        input=[{"role": "user", "content": build_openai_content(uploaded_files)}],
-        reasoning={"effort": "medium"},
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "invoice_trip_rows",
-                "strict": True,
-                "schema": OPENAI_RESPONSE_SCHEMA,
-            }
-        },
-        store=False,
-    )
-    return parse_gemini_response(response.output_text)
-
-
 def is_retryable_error(error):
     error_text = f"{type(error).__name__}: {error}".lower()
     retry_tokens = [
@@ -655,7 +542,7 @@ def is_retryable_error(error):
 def analyze_bills(uploaded_files):
     if not API_KEY:
         raise ValueError(
-            "Google API is not configured. Add GOOGLE_API_KEY to Streamlit secrets."
+            "Missing API key. Set GOOGLE_API_KEY in the environment or add it to Streamlit secrets."
         )
 
     client = genai.Client(api_key=API_KEY)
@@ -677,22 +564,11 @@ def analyze_bills(uploaded_files):
                 error_text = str(e).lower()
 
                 if "not_found" in error_text or "not found" in error_text:
-                    if OPENAI_API_KEY:
-                        st.warning(
-                            "Gemini is unavailable. Switching this batch to OpenAI now."
-                        )
-                        return analyze_bills_with_openai(uploaded_files)
                     st.warning(f"Model {model_name} unavailable; switching to next available model.")
                     break
 
                 if not is_retryable_error(e):
                     raise
-
-                if OPENAI_API_KEY:
-                    st.warning(
-                        "Google servers are busy. Switching this batch to OpenAI now."
-                    )
-                    return analyze_bills_with_openai(uploaded_files)
 
                 if attempt < MAX_RETRIES:
                     st.warning(
@@ -986,39 +862,6 @@ def render_processing_summary(database_path):
         show_duplicate_invoice_dialog(database_path)
 
 
-def enrich_extracted_records(records):
-    master_data = load_customer_master()
-    customer_lookup = build_customer_lookup(master_data)
-    records = apply_customer_master_lookup(records, customer_lookup)
-    return apply_freight_lookup(records, build_freight_lookup(master_data))
-
-
-def save_processing_result(records, processed_files):
-    records = enrich_extracted_records(records)
-    accepted_records, duplicates = store_new_invoice_records(
-        records,
-        DATABASE_PATH,
-    )
-    store_processed_uploads(processed_files, DATABASE_PATH)
-    for accepted_record in accepted_records:
-        log_processed_invoice(
-            accepted_record.get(
-                "Invoice No.",
-                accepted_record.get("Invoice No", ""),
-            ),
-            DATABASE_PATH,
-        )
-    st.session_state["bill_data"] = pd.DataFrame(
-        accepted_records,
-        columns=COLUMNS,
-    )
-    st.session_state["processing_new_count"] = len(accepted_records)
-    st.session_state["duplicate_invoices"] = duplicates
-    st.session_state["show_duplicate_invoice_details"] = False
-    st.session_state["last_input_file_count"] = len(processed_files)
-    st.session_state["last_result_record_count"] = len(records)
-
-
 st.set_page_config(
     page_title="Project Kill Bill",
     page_icon="",
@@ -1160,22 +1003,36 @@ if st.button("Process Bills", disabled=not files_selected_for_processing):
                 )
 
             records = analyze_bills(files_selected_for_processing)
-            save_processing_result(records, files_selected_for_processing)
+            master_data = load_customer_master()
+            customer_lookup = build_customer_lookup(master_data)
+            records = apply_customer_master_lookup(records, customer_lookup)
+            records = apply_freight_lookup(records, build_freight_lookup(master_data))
+            accepted_records, duplicates = store_new_invoice_records(
+                records,
+                DATABASE_PATH,
+            )
+            store_processed_uploads(files_selected_for_processing, DATABASE_PATH)
+            for accepted_record in accepted_records:
+                log_processed_invoice(
+                    accepted_record.get(
+                        "Invoice No.",
+                        accepted_record.get("Invoice No", ""),
+                    ),
+                    DATABASE_PATH,
+                )
+            st.session_state["bill_data"] = pd.DataFrame(
+                accepted_records,
+                columns=COLUMNS,
+            )
+            st.session_state["processing_new_count"] = len(accepted_records)
+            st.session_state["duplicate_invoices"] = duplicates
+            st.session_state["show_duplicate_invoice_details"] = False
         except json.JSONDecodeError:
-            st.error("The AI returned an unreadable result. Please process the batch again.")
+            st.error("Gemini returned invalid JSON. Please try processing again.")
         except Exception as error:
-            st.error(f"The AI could not complete this batch: {error}")
+            st.error(f"Failed to process bills: {error}")
 
 render_processing_summary(DATABASE_PATH)
-
-input_file_count = st.session_state.get("last_input_file_count", 0)
-result_record_count = st.session_state.get("last_result_record_count", 0)
-if input_file_count and result_record_count < input_file_count:
-    st.warning(
-        f"The AI returned {result_record_count} invoice row(s) from {input_file_count} "
-        "uploaded file(s). Some files may be additional pages, but one or more invoices "
-        "may also have been missed. Please verify the extracted rows before downloading."
-    )
 
 if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
     st.subheader("Review & Edit Extracted Data")

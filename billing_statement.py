@@ -216,6 +216,7 @@ def build_billing_statement_workbook(summary):
     workbook = Workbook()
     workbook.remove(workbook.active)
     months = list(summary["_bill_month"].drop_duplicates())
+    sheet_sizes = []
     for month in months:
         worksheet = workbook.create_sheet(_safe_sheet_title(month))
         if pd.isna(month):
@@ -223,6 +224,13 @@ def build_billing_statement_workbook(summary):
         else:
             month_data = summary.loc[summary["_bill_month"] == month, SUMMARY_COLUMNS]
         _write_month_sheet(worksheet, month_data, month)
+        sheet_sizes.append(len(month_data))
+
+    # A batch can contain a small number of invoices from an earlier month. Excel
+    # otherwise opens that first (often nearly empty) sheet, making it appear that
+    # the remaining invoices were omitted even though they are on another tab.
+    # Open the sheet containing the most invoices; ties retain chronological order.
+    workbook.active = max(range(len(sheet_sizes)), key=sheet_sizes.__getitem__)
 
     output = io.BytesIO()
     workbook.save(output)

@@ -1358,6 +1358,15 @@ if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
             hide_index=True,
             height=360,
         )
+        statement_month_count = billing_statement["_bill_month"].nunique(
+            dropna=False
+        )
+        if statement_month_count > 1:
+            st.caption(
+                f"The downloaded statement contains all {len(billing_statement)} "
+                f"invoices across {statement_month_count} monthly tabs and opens on "
+                "the tab with the most invoices."
+            )
         st.download_button(
             label="Download Billing Statement",
             data=build_billing_statement_workbook(billing_statement),

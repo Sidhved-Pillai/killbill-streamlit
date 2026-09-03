@@ -145,6 +145,32 @@ class BillingStatementTests(unittest.TestCase):
             "Billing_Statement_Undated.xlsx",
         )
 
+    def test_multi_month_workbook_opens_largest_sheet_and_keeps_every_row(self):
+        june = self.dataframe.iloc[[0]].copy()
+        june["Date"] = "30-Jun-26"
+        july = self.dataframe.iloc[[1, 2, 3]].copy()
+        july["Date"] = ["01-Jul-26", "02-Jul-26", "03-Jul-26"]
+        source = pd.concat([june, july], ignore_index=True)
+
+        summary = build_billing_statement(source)
+        workbook = load_workbook(
+            io.BytesIO(build_billing_statement_workbook(summary))
+        )
+
+        self.assertEqual(workbook.sheetnames, ["Jun 2026", "Jul 2026"])
+        self.assertEqual(workbook.active.title, "Jul 2026")
+        exported_invoice_numbers = []
+        for worksheet in workbook.worksheets:
+            exported_invoice_numbers.extend(
+                worksheet.cell(row_number, 3).value
+                for row_number in range(4, worksheet.max_row + 1)
+                if worksheet.cell(row_number, 3).value
+            )
+        self.assertCountEqual(
+            exported_invoice_numbers,
+            source["Invoice No."].tolist(),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

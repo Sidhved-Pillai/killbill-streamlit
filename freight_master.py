@@ -173,6 +173,8 @@ def apply_freight_lookup(records, freight_lookup):
         ).strip().upper()
         customer_code = normalize_customer_code(enriched_record.get("Customer Code"))
         loading_point = normalize_loading_point(enriched_record.get("Loading Point"))
+        if loading_point is None:
+            loading_point = normalize_loading_point(enriched_record.get("From"))
 
         if invoice_number.startswith("TON"):
             enriched_record["Freight Charge"] = DELIVERY_CHALLAN_FREIGHT_CHARGE

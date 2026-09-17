@@ -71,7 +71,11 @@ def build_billing_statement(dataframe):
         kind="stable",
         na_position="last",
     )
-    freight = _numeric_series(organized, "Freight Charge")
+    # Missing rates are unresolved charges, not free trips.
+    freight = pd.to_numeric(
+        organized.get("Freight Charge", pd.Series(index=organized.index, dtype=float)),
+        errors="coerce",
+    )
     summary = pd.DataFrame(
         {
             "Invoice Date": organized["_parsed_date"].dt.strftime("%d-%b-%y"),
@@ -147,7 +151,11 @@ def _write_month_sheet(worksheet, month_data, month):
     for offset, (_, row) in enumerate(month_data.iterrows()):
         row_number = first_data_row + offset
         for column_number, header in enumerate(SUMMARY_COLUMNS, start=1):
-            cell = worksheet.cell(row=row_number, column=column_number, value=row[header])
+            value = row[header]
+            cell = worksheet.cell(
+                row=row_number, column=column_number,
+                value=None if pd.isna(value) else value,
+            )
             cell.border = table_border
             cell.alignment = Alignment(
                 horizontal="center" if header in {"Sr. No.", "Vehicle", "Case", "Jar"} else "left",
@@ -161,7 +169,11 @@ def _write_month_sheet(worksheet, month_data, month):
             worksheet.cell(row=row_number, column=column_number).border = table_border
 
     worksheet.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=10)
-    total_label = worksheet.cell(row=total_row, column=1, value="Grand Total =======>")
+    missing_freight = pd.to_numeric(month_data["Freight"], errors="coerce").isna().any()
+    total_label = worksheet.cell(
+        row=total_row, column=1,
+        value="Partial Total (freight missing)" if missing_freight else "Grand Total =======>",
+    )
     total_label.font = Font(bold=True)
     total_label.alignment = Alignment(horizontal="center")
     for column_number in range(1, len(SUMMARY_COLUMNS) + 1):

@@ -7,6 +7,7 @@ column, so the code column is identified by its values rather than its header.
 
 import logging
 import os
+import re
 
 import pandas as pd
 import streamlit as st
@@ -25,6 +26,10 @@ def normalize_customer_code(value):
     if value is None or pd.isna(value):
         return ""
     return "".join(str(value).strip().upper().split())
+
+
+def _ocr_code_key(code):
+    return code.translate(str.maketrans({"O": "0", "I": "1", "L": "1"}))
 
 
 def find_mumc_customer_code_column(master_data):
@@ -95,6 +100,17 @@ def apply_customer_master_lookup(records, customer_lookup):
     for record in records:
         enriched_record = record.copy()
         customer_code = normalize_customer_code(enriched_record.get("Customer Code"))
+        if customer_code not in customer_lookup:
+            # OCR commonly reads numeric zero as the letter O. Only repair a
+            # code when it uniquely identifies a real master entry; names alone
+            # are unsafe (different distributors can share the same name).
+            candidates = [
+                code for code in customer_lookup
+                if _ocr_code_key(code) == _ocr_code_key(customer_code)
+            ] if re.fullmatch(r"MUMC[0-9OIL]+", customer_code) else []
+            if len(candidates) == 1:
+                customer_code = candidates[0]
+                enriched_record["Customer Code"] = customer_code
         master_customer = customer_lookup.get(customer_code)
         if master_customer:
             enriched_record["Customer Name"] = master_customer["Customer Name"]

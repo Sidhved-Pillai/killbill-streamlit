@@ -5,6 +5,7 @@ Apply after master enrichment, before review/history; never on editor reruns.
 """
 
 import csv
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -28,7 +29,7 @@ def _date_key(value):
 
 
 def apply_invoice_billing_reference(records):
-    """Override only legible reference fields for an exact invoice/date/origin."""
+    """Fill master gaps for exact invoices, preserving confirmed zero exceptions."""
     with REFERENCE_PATH.open(newline="", encoding="utf-8") as reference_file:
         reference = {
             (row["invoice_number"], row["date"], row["origin"]): row
@@ -45,12 +46,20 @@ def apply_invoice_billing_reference(records):
         )
         match = reference.get(key)
         if match:
-            result["Freight Charge"] = int(match["freight"])
-            if match["short_address"]:
+            # The updated customer master supersedes the older photo, except
+            # for the two explicitly confirmed invoice-specific free trips.
+            confirmed_zero = int(match["freight"]) == 0
+            try:
+                has_freight = math.isfinite(float(result.get("Freight Charge")))
+            except (TypeError, ValueError):
+                has_freight = False
+            use_freight = confirmed_zero or not has_freight
+            use_location = confirmed_zero or result.get("Lookup Status") != "✅ Matched"
+            if use_freight:
+                result["Freight Charge"] = int(match["freight"])
+            if use_location and match["short_address"]:
                 result["To"] = match["short_address"]
-            result["Lookup Status"] = (
-                "✅ Invoice reference" if match["short_address"]
-                else "⚠ Invoice freight reference; verify location"
-            )
+            if use_freight or (use_location and match["short_address"]):
+                result["Lookup Status"] = "✅ Invoice reference"
         enriched.append(result)
     return enriched

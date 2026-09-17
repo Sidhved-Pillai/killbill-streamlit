@@ -7,8 +7,11 @@ It is not a complete customer/rate master. Customer names and some locations are
 clipped, so no customer-code or name-based rules are inferred.
 
 An entry applies only to its invoice number, invoice date, and origin. It takes
-precedence over master enrichment for its populated fields before review and
-history storage. Review edits remain editable. Existing history and downloads
+effect only for fields unresolved by the updated master, except the two confirmed
+zero-charge invoices, which remain explicit overrides. The updated master's
+matched short addresses and valid rates take precedence over positive photo
+values. References apply before review and history storage. Review edits remain
+editable. Existing history and downloads
 are not retroactively modified; reprocess the source invoices using the existing
 duplicate/re-upload workflow to generate corrected results.
 

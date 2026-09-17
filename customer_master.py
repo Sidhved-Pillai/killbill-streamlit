@@ -48,11 +48,27 @@ def find_mumc_customer_code_column(master_data):
     return max(matching_columns, key=lambda item: item[0])[1]
 
 
+def read_customer_master(path):
+    """Accept both the updated row-1 layout and the legacy row-2 layout."""
+    required = {MASTER_NAME_COLUMN, MASTER_SHORT_ADDRESS_COLUMN}
+    for header_row in (0, 1):
+        master = pd.read_excel(path, header=header_row, dtype=str)
+        master.columns = master.columns.str.strip()
+        if required.issubset(master.columns):
+            find_mumc_customer_code_column(master)
+            return master
+    raise ValueError("Customer master headers were not found in the first two rows.")
+
+
 @st.cache_data(show_spinner=False)
+def _load_customer_master(path, modified_ns, size):
+    """Include the file version in the cache key when the master is replaced."""
+    return read_customer_master(path)
+
+
 def load_customer_master():
-    """Load the permanent customer master once per Streamlit cache lifecycle."""
-    # Row 2 contains headers; row 1 is a set of address/reference values.
-    return pd.read_excel(MASTER_DATABASE_PATH, header=1, dtype=str)
+    stat = os.stat(MASTER_DATABASE_PATH)
+    return _load_customer_master(MASTER_DATABASE_PATH, stat.st_mtime_ns, stat.st_size)
 
 
 def build_customer_lookup(master_data):
@@ -86,8 +102,8 @@ def build_customer_lookup(master_data):
             )
             continue
         lookup[customer_code] = {
-            "Customer Name": row[MASTER_NAME_COLUMN],
-            "To": row[MASTER_SHORT_ADDRESS_COLUMN],
+            "Customer Name": row[MASTER_NAME_COLUMN].strip() if isinstance(row[MASTER_NAME_COLUMN], str) else row[MASTER_NAME_COLUMN],
+            "To": row[MASTER_SHORT_ADDRESS_COLUMN].strip() if isinstance(row[MASTER_SHORT_ADDRESS_COLUMN], str) else row[MASTER_SHORT_ADDRESS_COLUMN],
         }
 
     # Future freight lookup belongs here, using this same MUMC-keyed master data.

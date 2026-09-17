@@ -60,13 +60,31 @@ def test_numeric_invoice_gets_reference_rate_without_ton_prefix():
     assert result["To"] == "Bhiwandi"
 
 
-def test_reference_overrides_old_master_rate_and_handles_normalized_keys():
+def test_reference_fills_missing_rate_and_handles_normalized_keys():
     result = apply_invoice_billing_reference([invoice(**{
         "Invoice No.": " mumcin270045533 ", "Date": "2026-08-01",
-        "From": "Bhiwandi Depot", "To": "Old location", "Freight Charge": 3844,
+        "From": "Bhiwandi Depot", "To": "Old location", "Freight Charge": "",
     })])[0]
     assert result["Freight Charge"] == 5073
     assert result["To"] == "Kharghar"
+
+
+def test_updated_master_values_take_precedence_over_positive_photo_rates():
+    source = invoice(**{
+        "Freight Charge": 3844, "To": "Updated master location",
+        "Lookup Status": "✅ Matched",
+    })
+    assert apply_invoice_billing_reference([source]) == [source]
+
+
+def test_photo_fills_missing_rate_without_replacing_master_location():
+    source = invoice(**{
+        "Freight Charge": "", "To": "Updated master location",
+        "Lookup Status": "✅ Matched",
+    })
+    result = apply_invoice_billing_reference([source])[0]
+    assert result["Freight Charge"] == 5073
+    assert result["To"] == "Updated master location"
 
 
 def test_reshma_uses_confirmed_location():
@@ -85,7 +103,10 @@ def test_reshma_uses_confirmed_location():
 ])
 @pytest.mark.parametrize("previous_rate", ["", 5073])
 def test_confirmed_zero_rates_remain_numeric_zero_in_export(number, date, location, previous_rate):
-    source = invoice(**{"Invoice No.": number, "Date": date, "Freight Charge": previous_rate})
+    source = invoice(**{
+        "Invoice No.": number, "Date": date, "Freight Charge": previous_rate,
+        "Lookup Status": "✅ Matched",
+    })
     records = apply_invoice_billing_reference([source])
     assert records[0]["Freight Charge"] == 0
     assert records[0]["To"] == location

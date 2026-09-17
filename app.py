@@ -379,7 +379,7 @@ Return ONLY a single valid JSON list of objects. Each object represents one invo
 Rules:
 - Treat all attached documents as one consolidated batch and aggregate the final result across the whole upload.
 - Extract the "Shipped To" section in this exact order: Customer Code, Customer Name, address lines, then administrative fields.
-- "Loading Point": extract the invoice origin from the "Shipped From" section only. Normalize it to exactly one of Thane, Vasai, Andheri, Vidya Vihar, Bhiwandi, Kandivali, PRPL, Wada, Mahul, Khopoli, or Kamshet. Use null when it cannot be determined.
+- "Loading Point": extract the invoice origin from the "Shipped From" section only. Normalize it to exactly one of Thane, Vasai, Andheri, Vidya Vihar, Bhiwandi, Kandivali, PRPL, Wada, Mahul, Khopoli, Kamshet, or Ambernath. Use null when it cannot be determined.
 - "Customer Code": extract only the value after "Customer Code :" (or "Customer Code:") in the "Shipped To" section. Do not use any other identifier.
 - "Customer Name": extract ONLY the first text line immediately after Customer Code. It must be exactly one business/company name and must not contain any address text.
 - "To": begin immediately AFTER the Customer Name. Concatenate every subsequent physical-address line, in order, into one value. Stop before the first administrative field: State Code, GSTIN, PAN, Phone, Email, FSSAI, Payment Terms, or any tax identifier.

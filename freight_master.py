@@ -28,6 +28,7 @@ LOADING_POINTS = (
     "Mahul",
     "Khopoli",
     "Kamshet",
+    "Ambernath",
 )
 
 APPROVED_ROUNDED_FREIGHT_CHARGES = frozenset(
@@ -54,6 +55,8 @@ def normalize_loading_point(value):
         "MAHUL": "Mahul",
         "KHOPOLI": "Khopoli",
         "KAMSHET": "Kamshet",
+        "AMBERNATH": "Ambernath",
+        "AMBARNATH": "Ambernath",
     }
     exact_match = aliases.get(normalized)
     if exact_match:
@@ -100,11 +103,15 @@ def _is_valid_number(value):
 
 
 def _distance_matches_slab(distance, slab):
-    """Validate the workbook's ``lower-upper`` slab for the given distance."""
+    """Validate a slab, including the team's approved open-ended top bracket."""
     match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*", str(slab))
     if not match:
         return False
     lower, upper = map(float, match.groups())
+    # The workbook labels its capped top bracket 110-130 even for longer
+    # trips. The billing team confirmed that these use the same top rate.
+    if (lower, upper) == (110, 130):
+        return float(distance) >= lower
     return lower <= float(distance) <= upper
 
 

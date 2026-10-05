@@ -27,6 +27,7 @@ from excel_export import build_excel_workbook, excel_export_filename
 from invoice_reference import apply_invoice_billing_reference
 from freight_master import (
     apply_freight_lookup,
+    apply_freight_rate_revision,
     build_freight_lookup,
     normalize_loading_point,
     short_origin,
@@ -1303,6 +1304,7 @@ if st.button("Process Bills", disabled=not files_selected_for_processing):
             records = apply_customer_master_lookup(records, customer_lookup)
             records = apply_freight_lookup(records, build_freight_lookup(master_data))
             records = apply_invoice_billing_reference(records)
+            records = apply_freight_rate_revision(records)
             accepted_records, duplicates = store_new_invoice_records(
                 records,
                 DATABASE_PATH,
@@ -1346,7 +1348,7 @@ if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
     if missing_freight.any():
         st.warning(
             f"{int(missing_freight.sum())} invoice(s) have no freight rate. "
-            "Check Customer Code, From, and the customer/rate master before billing. "
+            "Check invoice Date, Customer Code, From, and the customer/rate master before billing. "
             "Unmatched customers retain the extracted address; statement totals "
             "exclude missing charges."
         )

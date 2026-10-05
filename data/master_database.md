@@ -28,3 +28,27 @@ Those references only fill unresolved fields on their exact invoices, except
 the two intentional zero-charge invoices, which remain explicit exceptions.
 The TON delivery-challan rate and invoice/history duplicate handling remain
 unchanged. Previously saved history and downloaded workbooks are not rewritten.
+
+## Freight revision effective 1 September 2026
+
+The billing team confirmed the effective date shown in the October update's
+screenshot is **1 September 2026**, based on the invoice date, not upload date.
+After master/reference lookup and existing rounding, the app applies:
+
+| Base freight | Revised freight |
+| --- | --- |
+| 3844 | 4644 |
+| 4509 | 5309 |
+| 5073 | 5873 |
+| 6509 | 7309 |
+| 8748 | 9548 |
+| 10160 | 10960 |
+| 4327 | 5127 |
+
+This includes TON delivery challans and the capped top rate. Earlier invoice
+dates retain their original rates. Zero charges, missing rates, and unrelated
+special rates are unchanged. An invalid/missing invoice date leaves an affected
+charge blank and flags it for review. The workbook retains base rates so older
+invoices can still be processed accurately. Conversion occurs before history
+storage and editing; editor reruns and exports never add the increase again.
+Existing saved history/downloads are not retroactively repriced.

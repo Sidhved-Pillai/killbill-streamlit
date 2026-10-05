@@ -8,6 +8,7 @@ Only the resulting freight rate is exposed to the application.
 import logging
 import math
 import re
+from datetime import date, datetime
 
 import pandas as pd
 
@@ -35,6 +36,52 @@ APPROVED_ROUNDED_FREIGHT_CHARGES = frozenset(
     {3844, 4509, 5073, 6509, 8748, 10160}
 )
 DELIVERY_CHALLAN_FREIGHT_CHARGE = 4327
+FREIGHT_REVISION_EFFECTIVE_DATE = date(2026, 9, 1)
+REVISED_FREIGHT_CHARGES = {
+    3844: 4644,
+    4509: 5309,
+    5073: 5873,
+    6509: 7309,
+    8748: 9548,
+    10160: 10960,
+    4327: 5127,
+}
+
+
+def _freight_invoice_date(value):
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    for date_format in ("%d-%b-%y", "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(str(value).strip(), date_format).date()
+        except ValueError:
+            pass
+    return None
+
+
+def apply_freight_rate_revision(records):
+    """Apply the dated tariff after master/reference lookup, before review/storage.
+
+    Only the seven approved base rates change. Missing dates leave affected
+    freight unresolved rather than silently choosing the wrong tariff.
+    """
+    revised_records = []
+    for record in records:
+        revised = record.copy()
+        charge = round_freight_charge(record.get("Freight Charge"))
+        if _is_valid_number(charge) and float(charge) in REVISED_FREIGHT_CHARGES:
+            invoice_date = _freight_invoice_date(record.get("Date"))
+            if invoice_date is None:
+                revised["Freight Charge"] = ""
+                revised["Lookup Status"] = "⚠ Verify invoice date for freight"
+            elif invoice_date >= FREIGHT_REVISION_EFFECTIVE_DATE:
+                revised["Freight Charge"] = REVISED_FREIGHT_CHARGES[float(charge)]
+        revised_records.append(revised)
+    return revised_records
 
 
 def normalize_loading_point(value):

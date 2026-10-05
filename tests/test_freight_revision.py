@@ -6,7 +6,11 @@ import pytest
 from openpyxl import load_workbook
 
 from billing_statement import build_billing_statement, build_billing_statement_workbook
-from freight_master import apply_freight_lookup, apply_freight_rate_revision
+from freight_master import (
+    apply_freight_lookup,
+    apply_freight_rate_revision,
+    apply_freight_rate_revision_to_dataframe,
+)
 from invoice_reference import apply_invoice_billing_reference
 
 
@@ -73,3 +77,29 @@ def test_confirmed_zero_and_numeric_invoice_references_remain_historical():
     ]
     result = apply_freight_rate_revision(apply_invoice_billing_reference(records))
     assert [r["Freight Charge"] for r in result] == [0, 0, 4327]
+
+
+def test_persisted_review_dataframe_is_refreshed_idempotently():
+    original = pd.DataFrame([
+        {"Date": "05-Oct-26", "Invoice No.": "A", "Freight Charge": 3844},
+        {"Date": "05-Oct-26", "Invoice No.": "B", "Freight Charge": 4327},
+        {"Date": "31-Aug-26", "Invoice No.": "C", "Freight Charge": 4509},
+        {"Date": "05-Oct-26", "Invoice No.": "D", "Freight Charge": 0},
+    ], index=[4, 7, 9, 12])
+
+    refreshed = apply_freight_rate_revision_to_dataframe(original)
+    refreshed_again = apply_freight_rate_revision_to_dataframe(refreshed)
+
+    assert refreshed["Freight Charge"].tolist() == [4644, 5127, 4509, 0]
+    assert refreshed_again.equals(refreshed)
+    assert refreshed.index.tolist() == [4, 7, 9, 12]
+    assert original["Freight Charge"].tolist() == [3844, 4327, 4509, 0]
+
+
+@pytest.mark.parametrize("dataframe", [None, pd.DataFrame()])
+def test_empty_review_dataframe_refresh_is_safe(dataframe):
+    result = apply_freight_rate_revision_to_dataframe(dataframe)
+    if dataframe is None:
+        assert result is None
+    else:
+        assert result.empty

@@ -84,6 +84,14 @@ def apply_freight_rate_revision(records):
     return revised_records
 
 
+def apply_freight_rate_revision_to_dataframe(dataframe):
+    """Refresh persisted Streamlit review data without changing its shape."""
+    if dataframe is None or dataframe.empty:
+        return dataframe.copy() if dataframe is not None else dataframe
+    revised = apply_freight_rate_revision(dataframe.to_dict("records"))
+    return pd.DataFrame(revised, columns=dataframe.columns, index=dataframe.index)
+
+
 def normalize_loading_point(value):
     """Return a known loading point, or ``None`` when the value is ambiguous."""
     if value is None or pd.isna(value):

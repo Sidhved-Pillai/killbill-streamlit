@@ -34,6 +34,7 @@ importlib.reload(freight_master)
 from freight_master import (
     apply_freight_lookup,
     apply_freight_rate_revision,
+    apply_freight_rate_revision_to_dataframe,
     build_freight_lookup,
     normalize_loading_point,
     short_origin,
@@ -1342,11 +1343,18 @@ render_processing_summary(DATABASE_PATH)
 if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
     st.subheader("Review & Edit Extracted Data")
 
+    # Sessions can survive a Streamlit Cloud code redeploy. Refresh any table
+    # built under the previous tariff before it is shown or downloaded.
+    st.session_state["bill_data"] = apply_freight_rate_revision_to_dataframe(
+        st.session_state["bill_data"]
+    )
+
     edited_df = st.data_editor(
         st.session_state["bill_data"],
         num_rows="dynamic",
         use_container_width=True,
         hide_index=True,
+        key="billing_review_september_2026_tariff",
     )
 
     st.session_state["bill_data"] = edited_df

@@ -24,7 +24,13 @@ from customer_master import (
     load_customer_master,
 )
 from excel_export import build_excel_workbook, excel_export_filename
-from invoice_reference import apply_invoice_billing_reference
+
+# Streamlit Cloud can hot-reload this entrypoint while retaining the previous
+# local module in the worker. Refresh it before importing newly added APIs.
+import freight_master
+
+importlib.reload(freight_master)
+
 from freight_master import (
     apply_freight_lookup,
     apply_freight_rate_revision,
@@ -32,6 +38,7 @@ from freight_master import (
     normalize_loading_point,
     short_origin,
 )
+from invoice_reference import apply_invoice_billing_reference
 
 # Streamlit Cloud can hot-reload this entrypoint while retaining an older
 # imported module in the worker process. Reload the local history module before

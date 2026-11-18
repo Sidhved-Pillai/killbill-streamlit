@@ -68,6 +68,22 @@ def test_workbook_lookup_uses_the_loading_points_distance_triplet():
     assert lookup["MUMC001"]["Thane"] == 4508.64
 
 
+def test_direct_origin_header_and_zero_triplet_are_supported():
+    master = pd.DataFrame({
+        "Customer Code": ["MUMC001"],
+        "Thane": [0], "Slab": [0], "Rate": [0],
+    })
+    assert build_freight_lookup(master)["MUMC001"]["Thane"] == 0
+
+
+def test_revised_master_rate_is_normalized_for_dated_tariff_application():
+    master = pd.DataFrame({
+        "Customer Code": ["MUMC001"],
+        "Thane": [22], "Slab": ["21-30"], "Rate": [5309],
+    })
+    assert build_freight_lookup(master)["MUMC001"]["Thane"] == 4509
+
+
 class OriginNormalizationTests(unittest.TestCase):
     def test_bhiwandi_yewai_warehouse_is_not_confused_with_thane_district(self):
         address = (

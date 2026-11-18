@@ -46,6 +46,9 @@ REVISED_FREIGHT_CHARGES = {
     10160: 10960,
     4327: 5127,
 }
+BASE_FREIGHT_CHARGES = {
+    revised: base for base, revised in REVISED_FREIGHT_CHARGES.items()
+}
 
 
 def _freight_invoice_date(value):
@@ -141,9 +144,13 @@ def _normalise_header(value):
 
 
 def _find_distance_column(master_data, loading_point):
-    target = _normalise_header(f"Distance from {loading_point}")
+    targets = {
+        re.sub(r"[^A-Z0-9]", "", f"Distance from {loading_point}".upper()),
+        re.sub(r"[^A-Z0-9]", "", loading_point.upper()),
+    }
     for index, column in enumerate(master_data.columns):
-        if _normalise_header(column) == target:
+        header = re.sub(r"[^A-Z0-9]", "", _normalise_header(column))
+        if header in targets:
             return index
     return None
 
@@ -159,6 +166,9 @@ def _is_valid_number(value):
 
 def _distance_matches_slab(distance, slab):
     """Validate a slab, including the team's approved open-ended top bracket."""
+    if _is_valid_number(slab) and float(distance) == float(slab) == 0:
+        # The new master represents unavailable/free routes as 0 / 0 / 0.
+        return True
     match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*", str(slab))
     if not match:
         return False
@@ -178,6 +188,17 @@ def round_freight_charge(value):
     if rounded_value in APPROVED_ROUNDED_FREIGHT_CHARGES:
         return rounded_value
     return value
+
+
+def normalize_master_freight_charge(value):
+    """Convert current standard tariffs to their base for date-aware billing."""
+    if not _is_valid_number(value):
+        return value
+    numeric_value = float(value)
+    rounded_value = int(round(numeric_value))
+    if numeric_value == rounded_value and rounded_value in BASE_FREIGHT_CHARGES:
+        return BASE_FREIGHT_CHARGES[rounded_value]
+    return numeric_value
 
 
 def build_freight_lookup(master_data):
@@ -213,7 +234,7 @@ def build_freight_lookup(master_data):
                 or not _is_valid_number(charge)
             ):
                 continue
-            routes[point] = float(charge)
+            routes[point] = normalize_master_freight_charge(charge)
 
         lookup[customer_code] = routes
 

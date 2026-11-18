@@ -21,7 +21,7 @@ def master():
 
 def test_deployed_workbook_includes_updated_customer_codes(master):
     customers = build_customer_lookup(master)
-    assert len(customers) == 319
+    assert len(customers) == 331
     assert customers["MUMC021168"]["To"] == "Kalyan East"
     assert customers["MUMC021169"]["To"] == "Taloja"
     assert customers["MUMC021357"]["To"] == "BHIWANDI"
@@ -30,24 +30,14 @@ def test_deployed_workbook_includes_updated_customer_codes(master):
 
 
 @pytest.mark.parametrize("origin,expected", [
-    ("Kamshet", 8748), ("Thane", 4509), ("Vasai", 6509),
-    ("Andheri", 5073), ("Vidya Vihar", 5073),
-    ("Bhiwandi", 3844), ("Ambernath", 3844), ("Wada", 6509),
+    ("Thane", 4509), ("Vasai", 6509), ("Andheri", 5073),
+    ("Vidya Vihar", 5073), ("Bhiwandi", 0), ("Ambernath", 3844),
 ])
 def test_example_customer_uses_correct_distance_slab_rate_triplet(master, origin, expected):
     result = apply_freight_lookup([
         {"Customer Code": "MUMC002959", "Loading Point": origin}
     ], build_freight_lookup(master))[0]
     assert result["Freight Charge"] == expected
-
-
-def test_distance_above_130_uses_confirmed_capped_rate(master):
-    row = master.loc[master["Customer code"] == "MUMC002961"].iloc[0]
-    assert float(row["Distance from Kamshet"]) == 185
-    result = apply_freight_lookup([
-        {"Customer Code": "MUMC002961", "From": "Kamshet"}
-    ], build_freight_lookup(master))[0]
-    assert result["Freight Charge"] == 10160
 
 
 def test_updated_master_wins_over_photo_through_billing_export(master):
@@ -66,6 +56,34 @@ def test_updated_master_wins_over_photo_through_billing_export(master):
     sheet = load_workbook(io.BytesIO(build_billing_statement_workbook(summary))).active
     assert sheet["G4"].value == "THAKURLI EAST"
     assert sheet["K4"].value == 4509
+
+
+def test_current_master_rate_is_applied_once_by_invoice_date(master):
+    lookup = build_freight_lookup(master)
+    records = [
+        {"Customer Code": "MUMC002959", "From": "Thane", "Date": date}
+        for date in ("31-Aug-26", "01-Sep-26")
+    ]
+    records = apply_freight_lookup(records, lookup)
+    from freight_master import apply_freight_rate_revision
+    records = apply_freight_rate_revision(records)
+    assert [record["Freight Charge"] for record in records] == [4509, 5309]
+
+
+def test_new_master_direct_origin_headers_are_detected(master):
+    lookup = build_freight_lookup(master)
+    assert set(lookup["MUMC002959"]) == {
+        "Thane", "Vasai", "Andheri", "Vidya Vihar", "Bhiwandi", "Ambernath"
+    }
+
+
+def test_current_master_special_rate_is_not_remapped(master):
+    lookup = build_freight_lookup(master)
+    special_routes = [
+        rate for routes in lookup.values() for rate in routes.values()
+        if rate in {3715.0, 4902.0, 8454.0}
+    ]
+    assert {3715.0, 4902.0, 8454.0}.issubset(set(special_routes))
 
 
 @pytest.mark.parametrize("header_row", [0, 1])

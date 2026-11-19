@@ -17,12 +17,14 @@ API_KEY = (
     or st.secrets.get("GOOGLE_API_KEY", "")
 )
 MODEL_FALLBACKS = [
-    "gemini-3.1-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
-    "gemini-3.6-flash",
+    "gemini-3.1-flash-lite",
 ]
-MAX_RETRIES = 5
+MAX_RETRIES = 2
 INITIAL_BACKOFF_SECONDS = 4
+GEMINI_TOTAL_TIMEOUT_SECONDS = 180
 
 PREMIUM_CSS = """
 <style>

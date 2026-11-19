@@ -1,6 +1,3 @@
-import base64
-import concurrent.futures
-import difflib
 import io
 import importlib
 import json
@@ -15,7 +12,6 @@ import pypdf
 import streamlit as st
 from google import genai
 from google.genai import types
-from openai import OpenAI
 from PIL import Image
 
 from customer_master import (
@@ -67,23 +63,19 @@ from billing_statement import (
 
 try:
     streamlit_api_key = st.secrets.get("GOOGLE_API_KEY", "")
-    streamlit_openai_api_key = st.secrets.get("OPENAI_API_KEY", "")
 except st.errors.StreamlitSecretNotFoundError:
     streamlit_api_key = ""
-    streamlit_openai_api_key = ""
 
 API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GENAI_API_KEY") or streamlit_api_key
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or streamlit_openai_api_key
-OPENAI_MODEL = "gpt-5.6"
-OPENAI_MAX_WORKERS = 4
 MODEL_FALLBACKS = [
-    "gemini-3.1-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
-    "gemini-3.6-flash",
+    "gemini-3.1-flash-lite",
 ]
 MAX_RETRIES = 2
 INITIAL_BACKOFF_SECONDS = 4
-GEMINI_TOTAL_TIMEOUT_SECONDS = 60
+GEMINI_TOTAL_TIMEOUT_SECONDS = 180
 DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "billing_history.db")
 
 PREMIUM_CSS = """
@@ -540,237 +532,6 @@ def build_batch_content_parts(uploaded_files):
     return content_parts
 
 
-def build_openai_content(uploaded_files):
-    content = [
-        {
-            "type": "input_text",
-            "text": "Extract every distinct invoice trip row from all attached documents.",
-        }
-    ]
-    for uploaded_file in uploaded_files:
-        file_bytes = uploaded_file.getvalue()
-        extension = uploaded_file.name.rsplit(".", 1)[-1].lower()
-        mime_type = MIME_TYPES[extension]
-        encoded = base64.b64encode(file_bytes).decode("ascii")
-        content.append({"type": "input_text", "text": f"Document: {uploaded_file.name}"})
-        if extension == "pdf":
-            content.append(
-                {
-                    "type": "input_file",
-                    "filename": uploaded_file.name,
-                    "file_data": f"data:{mime_type};base64,{encoded}",
-                }
-            )
-        else:
-            content.append(
-                {
-                    "type": "input_image",
-                    "image_url": f"data:{mime_type};base64,{encoded}",
-                    "detail": "original",
-                }
-            )
-    return content
-
-
-OPENAI_RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "records": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "Date": {"type": "string"},
-                    "Invoice No.": {"type": "string"},
-                    "Vehicle No.": {"type": "string"},
-                    "From": {"type": "string"},
-                    "Loading Point": {"type": ["string", "null"]},
-                    "Customer Code": {"type": "string"},
-                    "Customer Name": {"type": "string"},
-                    "To": {"type": "string"},
-                    "Vehicle Type": {"type": "string"},
-                    "Case": {"type": "number"},
-                    "Jar": {"type": "number"},
-                    "items": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "description": {"type": "string"},
-                                "qty": {"type": ["number", "string"]},
-                            },
-                            "required": ["description", "qty"],
-                            "additionalProperties": False,
-                        },
-                    },
-                },
-                "required": [
-                    "Date", "Invoice No.", "Vehicle No.", "From", "Loading Point",
-                    "Customer Code", "Customer Name", "To", "Vehicle Type", "Case",
-                    "Jar", "items",
-                ],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": ["records"],
-    "additionalProperties": False,
-}
-
-
-def analyze_bills_with_openai(uploaded_files):
-    if not OPENAI_API_KEY:
-        raise ValueError(
-            "Gemini produced no result and OPENAI_API_KEY is not configured."
-        )
-
-    def analyze_one_file(uploaded_file):
-        openai_instruction = f"""
-{SYSTEM_INSTRUCTION}
-
-OpenAI fallback accuracy rules:
-- This request contains exactly one uploaded document named {uploaded_file.name!r}.
-- Inspect the original-resolution document carefully and transcribe identifiers character by character.
-- Do not guess obscured digits or silently substitute similar-looking characters.
-- Pay special attention to Invoice No., Customer Code, Customer Name, Vehicle No., and every item quantity.
-- Customer Code normally begins with MUMC. Preserve every following digit exactly as printed.
-- Extract every visible product row. A 20 LTR product is a Jar; all other product rows are Cases.
-- Still return Case and Jar as 0 because the application calculates them from the extracted items.
-- Return one record when the document contains one invoice. Return multiple records only when the
-  document visibly contains multiple distinct invoices.
-""".strip()
-        last_error = None
-        for _ in range(2):
-            try:
-                response = OpenAI(
-                    api_key=OPENAI_API_KEY,
-                    timeout=180.0,
-                ).responses.create(
-                    model=OPENAI_MODEL,
-                    instructions=openai_instruction,
-                    input=[
-                        {
-                            "role": "user",
-                            "content": build_openai_content([uploaded_file]),
-                        }
-                    ],
-                    reasoning={"effort": "high"},
-                    text={
-                        "format": {
-                            "type": "json_schema",
-                            "name": "invoice_trip_rows",
-                            "strict": True,
-                            "schema": OPENAI_RESPONSE_SCHEMA,
-                        }
-                    },
-                    store=False,
-                )
-                records = parse_gemini_response(response.output_text)
-                if records:
-                    return records
-                last_error = ValueError(
-                    f"OpenAI returned no invoice for {uploaded_file.name}."
-                )
-            except Exception as error:
-                last_error = error
-
-        raise ValueError(
-            f"OpenAI could not extract a usable invoice from {uploaded_file.name}: "
-            f"{last_error}"
-        )
-
-    worker_count = min(OPENAI_MAX_WORKERS, len(uploaded_files))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-        per_file_records = list(executor.map(analyze_one_file, uploaded_files))
-
-    records = [record for file_records in per_file_records for record in file_records]
-    records = repair_openai_customer_identifiers(records)
-    if not records:
-        raise ValueError("OpenAI also returned no invoice records for this batch.")
-    return records
-
-
-def _identifier_distance(left, right):
-    previous = list(range(len(right) + 1))
-    for left_index, left_character in enumerate(left, 1):
-        current = [left_index]
-        for right_index, right_character in enumerate(right, 1):
-            current.append(
-                min(
-                    current[-1] + 1,
-                    previous[right_index] + 1,
-                    previous[right_index - 1] + (left_character != right_character),
-                )
-            )
-        previous = current
-    return previous[-1]
-
-
-def _normalized_customer_name(value):
-    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
-
-
-def repair_openai_customer_identifiers(records):
-    """Repair only high-confidence OCR slips using the authoritative customer master."""
-    customer_lookup = build_customer_lookup(load_customer_master())
-    names_to_codes = {}
-    for code, customer in customer_lookup.items():
-        normalized_name = _normalized_customer_name(customer.get("Customer Name"))
-        if normalized_name:
-            names_to_codes.setdefault(normalized_name, []).append(code)
-
-    repaired_records = []
-    for record in records:
-        repaired_record = record.copy()
-        extracted_code = str(repaired_record.get("Customer Code", "") or "").strip().upper()
-        extracted_code = re.sub(r"\s+", "", extracted_code)
-        if extracted_code in customer_lookup:
-            repaired_records.append(repaired_record)
-            continue
-
-        extracted_name = _normalized_customer_name(
-            repaired_record.get("Customer Name", "")
-        )
-        exact_name_codes = names_to_codes.get(extracted_name, [])
-        if len(exact_name_codes) == 1:
-            repaired_record["Customer Code"] = exact_name_codes[0]
-            repaired_records.append(repaired_record)
-            continue
-
-        nearby_codes = [
-            code
-            for code in customer_lookup
-            if _identifier_distance(extracted_code, code) <= 1
-        ]
-        if len(nearby_codes) == 1:
-            repaired_record["Customer Code"] = nearby_codes[0]
-            repaired_records.append(repaired_record)
-            continue
-
-        if extracted_name and nearby_codes:
-            scored_codes = sorted(
-                (
-                    difflib.SequenceMatcher(
-                        None,
-                        extracted_name,
-                        _normalized_customer_name(
-                            customer_lookup[code].get("Customer Name")
-                        ),
-                    ).ratio(),
-                    code,
-                )
-                for code in nearby_codes
-            )
-            best_score, best_code = scored_codes[-1]
-            next_score = scored_codes[-2][0] if len(scored_codes) > 1 else 0
-            if best_score >= 0.88 and best_score - next_score >= 0.08:
-                repaired_record["Customer Code"] = best_code
-
-        repaired_records.append(repaired_record)
-
-    return repaired_records
-
-
 def is_retryable_error(error):
     error_text = f"{type(error).__name__}: {error}".lower()
     retry_tokens = [
@@ -816,6 +577,7 @@ def analyze_bills(uploaded_files):
                     contents=content_parts,
                     config=types.GenerateContentConfig(
                         system_instruction=SYSTEM_INSTRUCTION,
+                        response_mime_type="application/json",
                         http_options=types.HttpOptions(
                             timeout=max(1, int(remaining_seconds * 1000)),
                             retry_options=types.HttpRetryOptions(attempts=1),
@@ -827,8 +589,6 @@ def analyze_bills(uploaded_files):
                         f"Gemini exceeded the {GEMINI_TOTAL_TIMEOUT_SECONDS}-second limit."
                     )
                     break
-                print("DEBUG raw Gemini response before parse_gemini_response:")
-                print(response.text)
             except Exception as e:
                 last_error = e
                 error_text = str(e).lower()
@@ -881,22 +641,15 @@ def analyze_bills(uploaded_files):
         if time.monotonic() >= gemini_deadline:
             break
 
-    if OPENAI_API_KEY:
-        if isinstance(last_error, TimeoutError):
-            st.warning(
-                "Gemini did not finish within 1 minute. Switching this batch to OpenAI."
-            )
-        else:
-            st.warning(
-                "Gemini could not produce a result with any available model. "
-                "Switching this batch to OpenAI."
-            )
-        return analyze_bills_with_openai(uploaded_files)
-
-    if last_error is not None:
-        raise last_error
-
-    return []
+    if isinstance(last_error, TimeoutError):
+        raise RuntimeError(
+            "Gemini did not finish within 3 minutes. Please retry this batch; "
+            "no invoices from this attempt were saved."
+        ) from last_error
+    raise RuntimeError(
+        "Gemini could not process this batch with the available Gemini models. "
+        "Please retry in a few minutes; no invoices from this attempt were saved."
+    ) from last_error
 
 
 def init_database():

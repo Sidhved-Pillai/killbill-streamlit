@@ -97,7 +97,8 @@ PREMIUM_CSS = """
     }
 
     .premium-title-wrap {
-        margin-bottom: 1.2rem;
+        margin: 0 auto 1.2rem;
+        text-align: center;
     }
 
     .title-kicker {
@@ -121,6 +122,18 @@ PREMIUM_CSS = """
     .premium-title span {
         color: #D32F2F;
     }
+
+    .landing-hero { max-width: 760px; margin: .75rem auto 1.5rem; text-align: center; }
+    .invoice-illustration { position: relative; width: 280px; height: 180px; margin: 0 auto .75rem; border-radius: 50%; background: radial-gradient(circle, rgba(211,47,47,.12), rgba(211,47,47,0) 68%); }
+    .invoice-sheet { position: absolute; bottom: 5px; left: 50%; width: 120px; height: 145px; padding-top: 25px; transform: translateX(-50%); background: linear-gradient(#fff, #fafafa); border: 3px solid #e5e7eb; border-radius: 15px; box-shadow: 0 14px 30px rgba(17,17,17,.10); color: #00866a; font-size: 1.3rem; font-style: italic; font-weight: 800; z-index: 2; }
+    .invoice-sheet::after { content: ''; display: block; width: 75%; height: 56px; margin: 18px auto 0; background: repeating-linear-gradient(to bottom, #d9dde5 0 6px, transparent 6px 14px); }
+    .invoice-sheet.left, .invoice-sheet.right { bottom: 4px; height: 125px; opacity: .72; z-index: 1; }
+    .invoice-sheet.left { transform: translateX(-112%) rotate(-12deg); }
+    .invoice-sheet.right { transform: translateX(12%) rotate(12deg); }
+    .landing-hero h2 { margin: 0; color: #0c111b; font-size: clamp(2.2rem, 5vw, 3.4rem); line-height: 1.08; letter-spacing: -.04em; }
+    .landing-hero p { margin: .8rem auto 0; color: #596170; font-size: 1.08rem; line-height: 1.55; }
+    .upload-heading { margin: 1rem 0 .4rem; color: #111; font-size: 1.45rem; font-weight: 800; text-align: center; }
+    .upload-support { margin: .6rem 0 1.1rem; color: #6b7280; font-size: .86rem; text-align: center; }
 
     .onboarding-grid {
         display: grid;
@@ -165,6 +178,8 @@ PREMIUM_CSS = """
     }
 
     [data-testid="stFileUploader"] section {
+        max-width: 700px;
+        margin: 0 auto;
         background: #FFFFFF;
         border: 1px solid rgba(17, 17, 17, 0.12);
         border-radius: 16px;
@@ -407,6 +422,8 @@ PREMIUM_CSS = """
 
     @media (max-width: 760px) {
         .processing-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .premium-title { font-size: 2.35rem; }
+        .invoice-illustration { transform: scale(.86); margin-bottom: 0; }
     }
 </style>
 """
@@ -1149,68 +1166,57 @@ st.markdown(
 init_database()
 init_invoice_history_database(DATABASE_PATH)
 
-st.markdown('<div class="section-label">Billing Dashboard</div>', unsafe_allow_html=True)
-today_column, week_column, month_column = st.columns(3)
-for column, label, value in (
-    (today_column, "Today's Bills", get_today_count()),
-    (week_column, "This Week", get_week_count()),
-    (month_column, "This Month", get_month_count()),
-):
-    with column:
-        st.markdown(
-            f"""
-            <div class="onboarding-card">
-                <h4>{label}</h4>
-                <p>{value:,}</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
+with st.sidebar:
+    st.header("Billing Operations")
+    st.metric("Today's Bills", get_today_count())
+    st.metric("This Week", get_week_count())
+    st.metric("This Month", get_month_count())
+    if st.button("Processed Invoice History", key="toggle_processed_invoice_history"):
+        st.session_state["show_processed_invoice_history"] = not st.session_state.get(
+            "show_processed_invoice_history", False
         )
-
-st.markdown('<div style="height: 1rem;"></div>', unsafe_allow_html=True)
-
-if st.button("Processed Invoice History", key="toggle_processed_invoice_history"):
-    st.session_state["show_processed_invoice_history"] = not st.session_state.get(
-        "show_processed_invoice_history",
-        False,
-    )
+    with st.expander("Custom Report"):
+        start_date = st.date_input("From Date", value=date.today(), key="custom_report_start")
+        end_date = st.date_input("To Date", value=date.today(), key="custom_report_end")
+        generate_report = st.button("Generate", key="generate_custom_report")
+        if generate_report:
+            if start_date > end_date:
+                st.error("From Date must be on or before To Date.")
+            else:
+                st.session_state["custom_report_count"] = get_custom_count(start_date, end_date)
+        if "custom_report_count" in st.session_state:
+            st.metric("Invoices Processed", st.session_state["custom_report_count"])
 
 if st.session_state.get("show_processed_invoice_history", False):
+    st.markdown('<div class="section-label">Processed Invoice History</div>', unsafe_allow_html=True)
     render_processed_invoice_history(DATABASE_PATH)
 
-st.markdown('<div class="section-label">Custom Report</div>', unsafe_allow_html=True)
-from_column, to_column, generate_column = st.columns([1, 1, 0.7])
-with from_column:
-    start_date = st.date_input("From Date", value=date.today(), key="custom_report_start")
-with to_column:
-    end_date = st.date_input("To Date", value=date.today(), key="custom_report_end")
-with generate_column:
-    st.write("")
-    generate_report = st.button("Generate", key="generate_custom_report")
-
-if generate_report:
-    if start_date > end_date:
-        st.error("From Date must be on or before To Date.")
-    else:
-        st.session_state["custom_report_count"] = get_custom_count(start_date, end_date)
-
-if "custom_report_count" in st.session_state:
-    st.markdown(
-        f"""
-        <div class="onboarding-card">
-            <h4>Invoices Processed</h4>
-            <p>{st.session_state['custom_report_count']:,}</p>
+st.markdown(
+    """
+    <div class="landing-hero">
+        <div class="invoice-illustration" aria-hidden="true">
+            <div class="invoice-sheet left">Bisleri</div>
+            <div class="invoice-sheet right">Bisleri</div>
+            <div class="invoice-sheet">Bisleri</div>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-st.markdown('<div class="section-label">Upload Bisleri Bills</div>', unsafe_allow_html=True)
+        <h2>Upload Your Bisleri Bills</h2>
+        <p>Add your Bisleri bills and let us do the rest.<br>
+        We’ll scan, extract and create the invoices for you.</p>
+    </div>
+    <div class="upload-heading">Upload Bills</div>
+    """,
+    unsafe_allow_html=True,
+)
 
 uploaded_files = st.file_uploader(
     "Upload one or more bill images or PDFs",
     type=["png", "jpg", "jpeg", "pdf"],
     accept_multiple_files=True,
+    label_visibility="collapsed",
+)
+st.markdown(
+    '<div class="upload-support">Supports JPG, PNG, PDF &nbsp;•&nbsp; Up to 200MB per file</div>',
+    unsafe_allow_html=True,
 )
 
 if uploaded_files:

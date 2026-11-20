@@ -90,6 +90,11 @@ PREMIUM_CSS = """
         font-family: 'Inter', 'Helvetica Neue', sans-serif;
     }
 
+    [data-testid="stSidebar"],
+    [data-testid="collapsedControl"] {
+        display: none !important;
+    }
+
     .main .block-container {
         max-width: 1180px;
         padding-top: 2rem;
@@ -1166,31 +1171,6 @@ st.markdown(
 init_database()
 init_invoice_history_database(DATABASE_PATH)
 
-with st.sidebar:
-    st.header("Billing Operations")
-    st.metric("Today's Bills", get_today_count())
-    st.metric("This Week", get_week_count())
-    st.metric("This Month", get_month_count())
-    if st.button("Processed Invoice History", key="toggle_processed_invoice_history"):
-        st.session_state["show_processed_invoice_history"] = not st.session_state.get(
-            "show_processed_invoice_history", False
-        )
-    with st.expander("Custom Report"):
-        start_date = st.date_input("From Date", value=date.today(), key="custom_report_start")
-        end_date = st.date_input("To Date", value=date.today(), key="custom_report_end")
-        generate_report = st.button("Generate", key="generate_custom_report")
-        if generate_report:
-            if start_date > end_date:
-                st.error("From Date must be on or before To Date.")
-            else:
-                st.session_state["custom_report_count"] = get_custom_count(start_date, end_date)
-        if "custom_report_count" in st.session_state:
-            st.metric("Invoices Processed", st.session_state["custom_report_count"])
-
-if st.session_state.get("show_processed_invoice_history", False):
-    st.markdown('<div class="section-label">Processed Invoice History</div>', unsafe_allow_html=True)
-    render_processed_invoice_history(DATABASE_PATH)
-
 st.markdown(
     """
     <div class="landing-hero">
@@ -1258,12 +1238,19 @@ if processing_state and uploaded_files and not selection_matches:
     )
 
 show_start_button = not processing_state or not selection_matches
-if show_start_button and st.button(
-    "Start Scanning Bills",
-    disabled=not uploaded_files,
-    type="primary",
-    key="start_invoice_processing",
-):
+start_clicked = False
+if show_start_button:
+    _, start_button_column, _ = st.columns([1, 3, 1])
+    with start_button_column:
+        start_clicked = st.button(
+            "Start Scanning Bills",
+            disabled=not uploaded_files,
+            type="primary",
+            use_container_width=True,
+            key="start_invoice_processing",
+        )
+
+if start_clicked:
     processing_state = create_processing_state(uploaded_files)
     st.session_state[PROCESSING_STATE_KEY] = processing_state
     for key in (

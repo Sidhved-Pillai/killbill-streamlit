@@ -1,4 +1,5 @@
 import io
+import html
 import importlib
 import json
 import os
@@ -45,7 +46,6 @@ import invoice_history
 importlib.reload(invoice_history)
 
 from invoice_history import (
-    filter_unprocessed_uploads,
     get_processed_invoice,
     init_invoice_history_database,
     log_gemini_usage,
@@ -53,6 +53,7 @@ from invoice_history import (
     store_new_invoice_records,
     store_processed_invoice,
     store_processed_uploads,
+    upload_digest,
 )
 from billing_statement import (
     SUMMARY_COLUMNS,
@@ -73,10 +74,11 @@ MODEL_FALLBACKS = [
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
 ]
-MAX_RETRIES = 2
+MAX_RETRIES = 1
 INITIAL_BACKOFF_SECONDS = 4
-GEMINI_TOTAL_TIMEOUT_SECONDS = 180
+GEMINI_TOTAL_TIMEOUT_SECONDS = 60
 DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "billing_history.db")
+PROCESSING_STATE_KEY = "invoice_processing_batch"
 
 PREMIUM_CSS = """
 <style>
@@ -334,6 +336,78 @@ PREMIUM_CSS = """
         transform: none;
         text-decoration: underline;
     }
+
+    .scan-panel {
+        margin: 1rem 0;
+        padding: 1.4rem;
+        background: #FFFFFF;
+        border: 1px solid rgba(17, 17, 17, 0.09);
+        border-radius: 20px;
+        box-shadow: 0 12px 32px rgba(17, 17, 17, 0.08);
+    }
+
+    .scan-heading {
+        margin: 0;
+        color: #111111;
+        font-size: 1.75rem;
+        font-weight: 800;
+        text-align: center;
+    }
+
+    .scan-subtitle {
+        margin: 0.35rem 0 1rem;
+        color: #596170;
+        text-align: center;
+    }
+
+    .current-file-card, .processing-error-card, .duplicate-card {
+        margin: 0.9rem 0;
+        padding: 1rem 1.1rem;
+        border-radius: 14px;
+        background: #FFF5F5;
+        border: 1px solid rgba(211, 47, 47, 0.18);
+    }
+
+    .current-file-card strong, .processing-error-card strong {
+        color: #B71C1C;
+    }
+
+    .duplicate-card {
+        background: #FFF9E8;
+        border-color: rgba(245, 158, 11, 0.28);
+    }
+
+    .processing-stats {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.8rem;
+        margin: 1rem 0;
+    }
+
+    .processing-stat {
+        padding: 1rem;
+        background: #FFFFFF;
+        border: 1px solid rgba(17, 17, 17, 0.08);
+        border-radius: 16px;
+        text-align: center;
+    }
+
+    .processing-stat span {
+        display: block;
+        color: #596170;
+        font-size: 0.85rem;
+    }
+
+    .processing-stat strong {
+        display: block;
+        margin-top: 0.2rem;
+        color: #111111;
+        font-size: 1.75rem;
+    }
+
+    @media (max-width: 760px) {
+        .processing-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
 </style>
 """
 
@@ -556,7 +630,6 @@ def analyze_bills(uploaded_files):
         raise ValueError(
             "Missing API key. Set GOOGLE_API_KEY in the environment or add it to Streamlit secrets."
         )
-
     gemini_started_at = time.monotonic()
     gemini_deadline = gemini_started_at + GEMINI_TOTAL_TIMEOUT_SECONDS
     client = genai.Client(api_key=API_KEY)
@@ -594,27 +667,22 @@ def analyze_bills(uploaded_files):
                 error_text = str(e).lower()
 
                 if "not_found" in error_text or "not found" in error_text:
-                    st.warning(f"Model {model_name} unavailable; switching to next available model.")
+                    print(f"Gemini model unavailable: {model_name}")
                     break
 
                 if not is_retryable_error(e):
-                    st.warning(
-                        f"Gemini could not produce a result on {model_name}; "
-                        "trying the next available model."
-                    )
+                    print(f"Gemini model failed: {model_name} ({type(e).__name__})")
                     break
 
                 if attempt < MAX_RETRIES:
                     remaining_seconds = gemini_deadline - time.monotonic()
                     if remaining_seconds <= 0:
                         break
-                    st.warning(
-                        f"Google servers busy on {model_name}; retrying in 4 seconds... ({attempt}/{MAX_RETRIES})"
-                    )
+                    print(f"Gemini model busy; retrying: {model_name}")
                     time.sleep(min(INITIAL_BACKOFF_SECONDS, remaining_seconds))
                     continue
 
-                st.warning(f"Exhausted retries for {model_name}; trying the next available model.")
+                print(f"Gemini retries exhausted: {model_name}")
                 break
 
             log_gemini_usage(
@@ -628,14 +696,12 @@ def analyze_bills(uploaded_files):
                 records = parse_gemini_response(response.text)
             except (json.JSONDecodeError, TypeError, ValueError) as error:
                 last_error = error
-                st.warning(
-                    f"Gemini returned no usable result on {model_name}; trying the next model."
-                )
+                print(f"Gemini returned unusable JSON: {model_name}")
                 break
             if records:
                 return records
             last_error = ValueError(f"Gemini model {model_name} returned zero records.")
-            st.warning(f"Gemini returned no records on {model_name}; trying the next model.")
+            print(f"Gemini returned no records: {model_name}")
             break
 
         if time.monotonic() >= gemini_deadline:
@@ -643,12 +709,12 @@ def analyze_bills(uploaded_files):
 
     if isinstance(last_error, TimeoutError):
         raise RuntimeError(
-            "Gemini did not finish within 3 minutes. Please retry this batch; "
-            "no invoices from this attempt were saved."
+            "Gemini did not finish this invoice within 1 minute. You can retry "
+            "this invoice or skip it and continue with the remaining bills."
         ) from last_error
     raise RuntimeError(
-        "Gemini could not process this batch with the available Gemini models. "
-        "Please retry in a few minutes; no invoices from this attempt were saved."
+        "Gemini could not read this invoice with the available models. You can "
+        "retry this invoice or skip it and continue with the remaining bills."
     ) from last_error
 
 
@@ -697,6 +763,149 @@ def log_processed_invoice(invoice_no, database_path=DATABASE_PATH):
             """,
             (normalized_invoice_no, datetime.now().isoformat(timespec="seconds")),
         )
+
+
+def processing_batch_signature(uploaded_files):
+    """Identify the exact ordered upload selection across Streamlit reruns."""
+    return "|".join(
+        f"{uploaded_file.name}:{upload_digest(uploaded_file)}"
+        for uploaded_file in uploaded_files
+    )
+
+
+def create_processing_state(uploaded_files):
+    """Create resumable per-file processing state for one upload selection."""
+    return {
+        "signature": processing_batch_signature(uploaded_files),
+        "file_names": [uploaded_file.name for uploaded_file in uploaded_files],
+        "statuses": ["pending"] * len(uploaded_files),
+        "current_index": 0,
+        "records": [],
+        "duplicates": [],
+        "errors": {},
+        "current_error": None,
+        "status": "running",
+        "duplicate_decision": None,
+        "show_results": False,
+    }
+
+
+def enrich_invoice_records(records):
+    """Apply the established customer, freight, and dated-rate rules."""
+    master_data = load_customer_master()
+    records = apply_customer_master_lookup(records, build_customer_lookup(master_data))
+    records = apply_freight_lookup(records, build_freight_lookup(master_data))
+    records = apply_invoice_billing_reference(records)
+    return apply_freight_rate_revision(records)
+
+
+def process_next_invoice(uploaded_files, state):
+    """Process exactly one file, preserving all earlier results on failure."""
+    index = state["current_index"]
+    if index >= len(uploaded_files):
+        state["status"] = "complete"
+        return state
+
+    uploaded_file = uploaded_files[index]
+    state["statuses"][index] = "processing"
+    try:
+        records = analyze_bills([uploaded_file])
+        if not records:
+            raise ValueError("No invoice data was found in this file.")
+        records = enrich_invoice_records(records)
+        accepted_records, duplicates = store_new_invoice_records(
+            records,
+            DATABASE_PATH,
+        )
+        store_processed_uploads([uploaded_file], DATABASE_PATH)
+        for accepted_record in accepted_records:
+            log_processed_invoice(
+                accepted_record.get(
+                    "Invoice No.",
+                    accepted_record.get("Invoice No", ""),
+                ),
+                DATABASE_PATH,
+            )
+        for duplicate in duplicates:
+            duplicate_entry = duplicate.copy()
+            duplicate_entry["filename"] = uploaded_file.name
+            duplicate_entry["file_index"] = index
+            state["duplicates"].append(duplicate_entry)
+        state["records"].extend(accepted_records)
+        state["statuses"][index] = (
+            "duplicate" if duplicates and not accepted_records else "processed"
+        )
+        state["errors"].pop(str(index), None)
+        state["current_error"] = None
+        state["current_index"] += 1
+        if state["current_index"] >= len(uploaded_files):
+            state["status"] = "complete"
+    except Exception as error:
+        print(
+            f"Invoice processing failed for {uploaded_file.name}: "
+            f"{type(error).__name__}"
+        )
+        error_entry = {
+            "file_index": index,
+            "filename": uploaded_file.name,
+            "message": (
+                "We couldn't read this invoice. The image may be unclear, cropped, "
+                "or Gemini may be temporarily busy."
+            ),
+        }
+        state["statuses"][index] = "error"
+        state["errors"][str(index)] = error_entry
+        state["current_error"] = error_entry
+        state["status"] = "error"
+    return state
+
+
+def retry_current_invoice(state):
+    """Clear the current error so the same file is attempted again."""
+    error = state["current_error"]
+    failed_index = error["file_index"]
+    state["statuses"][failed_index] = "pending"
+    state["current_error"] = None
+    state["status"] = "running"
+    return state
+
+
+def skip_current_invoice(state, total_files):
+    """Record the failed file as skipped and advance without losing results."""
+    error = state["current_error"]
+    failed_index = error["file_index"]
+    state["statuses"][failed_index] = "skipped"
+    state["current_index"] += 1
+    state["current_error"] = None
+    state["status"] = (
+        "complete" if state["current_index"] >= total_files else "running"
+    )
+    return state
+
+
+def include_duplicate_records(state):
+    """Explicitly include duplicate invoices after the scan has completed."""
+    if state.get("duplicate_decision") is not None:
+        return state
+    for duplicate in state["duplicates"]:
+        record = duplicate["record"]
+        store_processed_invoice(record, DATABASE_PATH)
+        log_processed_invoice(
+            record.get("Invoice No.", record.get("Invoice No", "")),
+            DATABASE_PATH,
+        )
+        state["records"].append(record)
+    state["duplicate_decision"] = "include"
+    return state
+
+
+def publish_processing_results(state):
+    """Expose the finalized records to the established editor/export workflow."""
+    st.session_state["bill_data"] = pd.DataFrame(state["records"], columns=COLUMNS)
+    st.session_state["processing_new_count"] = len(state["records"])
+    st.session_state["duplicate_invoices"] = []
+    st.session_state["show_processing_results"] = False
+    state["results_published"] = True
 
 
 def _get_processed_count(start_date, end_date):
@@ -1014,86 +1223,261 @@ if uploaded_files:
         """,
         unsafe_allow_html=True,
     )
+    preview_files = uploaded_files[:5]
+    preview_columns = st.columns(len(preview_files) + (1 if file_count > 5 else 0))
+    for preview_column, uploaded_file in zip(preview_columns, preview_files):
+        with preview_column:
+            extension = uploaded_file.name.rsplit(".", 1)[-1].lower()
+            if extension in {"png", "jpg", "jpeg"}:
+                st.image(uploaded_file, use_container_width=True)
+            else:
+                st.markdown("### PDF")
+            st.caption(uploaded_file.name)
+    if file_count > 5:
+        with preview_columns[-1]:
+            st.markdown(f"### +{file_count - 5}")
+            st.caption("more bills")
 
-files_to_process = []
-repeated_files = []
-selected_repeated_files = []
-if uploaded_files:
-    files_to_process, repeated_files = filter_unprocessed_uploads(
-        uploaded_files,
-        DATABASE_PATH,
+current_signature = processing_batch_signature(uploaded_files) if uploaded_files else ""
+processing_state = st.session_state.get(PROCESSING_STATE_KEY)
+selection_matches = bool(
+    processing_state
+    and uploaded_files
+    and processing_state.get("signature") == current_signature
+)
+
+if processing_state and uploaded_files and not selection_matches:
+    st.info(
+        "The uploaded file selection changed. Start a new scan to process this selection."
     )
 
-if repeated_files:
-    st.warning(
-        f"Found {len(repeated_files)} identical file(s) that were already processed "
-        "or repeated in this upload."
-    )
-    process_repeated_files = st.checkbox(
-        "Process duplicate invoices anyway",
-        key="process_duplicate_uploads_anyway",
-        help="Selected files will be sent to Gemini again and may use additional credits.",
-    )
-    if process_repeated_files:
-        with st.expander("Select duplicate files to process", expanded=True):
-            selected_repeated_indexes = st.multiselect(
-                "Duplicate files",
-                options=list(range(len(repeated_files))),
-                default=list(range(len(repeated_files))),
-                format_func=lambda index: repeated_files[index].name,
-                key="selected_duplicate_upload_indexes",
+show_start_button = not processing_state or not selection_matches
+if show_start_button and st.button(
+    "Start Scanning Bills",
+    disabled=not uploaded_files,
+    type="primary",
+    key="start_invoice_processing",
+):
+    processing_state = create_processing_state(uploaded_files)
+    st.session_state[PROCESSING_STATE_KEY] = processing_state
+    for key in (
+        "bill_data",
+        "processing_new_count",
+        "duplicate_invoices",
+        "show_processing_results",
+    ):
+        st.session_state.pop(key, None)
+    st.rerun()
+
+if selection_matches:
+    processing_state = st.session_state[PROCESSING_STATE_KEY]
+    total_files = len(uploaded_files)
+    scanned_files = processing_state["current_index"]
+    progress_value = scanned_files / total_files if total_files else 0
+
+    st.markdown('<div class="scan-panel">', unsafe_allow_html=True)
+    if processing_state["status"] in {"running", "error", "cancelled"}:
+        heading = (
+            "Processing Invoices..."
+            if processing_state["status"] == "running"
+            else "Processing Paused"
+        )
+        st.markdown(f'<h2 class="scan-heading">{heading}</h2>', unsafe_allow_html=True)
+        st.markdown(
+            '<p class="scan-subtitle">Scanning and extracting each Bisleri bill individually</p>',
+            unsafe_allow_html=True,
+        )
+        st.progress(
+            progress_value,
+            text=f"{scanned_files} of {total_files} bills scanned · {round(progress_value * 100)}%",
+        )
+
+    if processing_state["status"] == "running":
+        current_index = processing_state["current_index"]
+        if current_index < total_files:
+            current_file = uploaded_files[current_index]
+            safe_current_filename = html.escape(current_file.name)
+            st.markdown(
+                f"""
+                <div class="current-file-card">
+                    <strong>Currently scanning bill {current_index + 1} of {total_files}</strong><br>
+                    {safe_current_filename}
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-            selected_repeated_files = [
-                repeated_files[index] for index in selected_repeated_indexes
-            ]
+            if st.button(
+                "Stop After Current Bill",
+                key=f"cancel_processing_{current_index}",
+            ):
+                processing_state["status"] = "cancelled"
+                st.session_state[PROCESSING_STATE_KEY] = processing_state
+                st.rerun()
 
-files_selected_for_processing = files_to_process + selected_repeated_files
+            processing_state = process_next_invoice(uploaded_files, processing_state)
+            st.session_state[PROCESSING_STATE_KEY] = processing_state
+            st.rerun()
 
-if st.button("Process Bills", disabled=not files_selected_for_processing):
-    with st.spinner("AI is analyzing documents..."):
-        try:
-            skipped_repeated_count = len(repeated_files) - len(selected_repeated_files)
-            if skipped_repeated_count:
-                st.warning(
-                    f"Skipped {skipped_repeated_count} identical file(s) already processed "
-                    "or repeated in this upload. No Gemini credits were used for them."
-                )
+    elif processing_state["status"] == "error":
+        error = processing_state["current_error"]
+        safe_error_filename = html.escape(error["filename"])
+        st.markdown(
+            f"""
+            <div class="processing-error-card">
+                <strong>Error at bill {error['file_index'] + 1} of {total_files}</strong><br>
+                {safe_error_filename}<br>
+                {error['message']}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        retry_column, skip_column = st.columns(2)
+        if retry_column.button(
+            f"Retry Bill {error['file_index'] + 1}",
+            type="primary",
+            use_container_width=True,
+            key="retry_failed_invoice",
+        ):
+            processing_state = retry_current_invoice(processing_state)
+            st.session_state[PROCESSING_STATE_KEY] = processing_state
+            st.rerun()
+        if skip_column.button(
+            "Skip This Bill",
+            use_container_width=True,
+            key="skip_failed_invoice",
+        ):
+            processing_state = skip_current_invoice(processing_state, total_files)
+            st.session_state[PROCESSING_STATE_KEY] = processing_state
+            st.rerun()
 
-            records = analyze_bills(files_selected_for_processing)
-            master_data = load_customer_master()
-            customer_lookup = build_customer_lookup(master_data)
-            records = apply_customer_master_lookup(records, customer_lookup)
-            records = apply_freight_lookup(records, build_freight_lookup(master_data))
-            records = apply_invoice_billing_reference(records)
-            records = apply_freight_rate_revision(records)
-            accepted_records, duplicates = store_new_invoice_records(
-                records,
-                DATABASE_PATH,
+    elif processing_state["status"] == "cancelled":
+        st.info(
+            f"Scanning paused after {scanned_files} of {total_files} bills. "
+            "Your completed results are preserved."
+        )
+        if st.button(
+            "Resume Scanning",
+            type="primary",
+            use_container_width=True,
+            key="resume_invoice_processing",
+        ):
+            processing_state["status"] = "running"
+            st.session_state[PROCESSING_STATE_KEY] = processing_state
+            st.rerun()
+
+    elif processing_state["status"] == "complete":
+        duplicate_count = len(processing_state["duplicates"])
+        error_count = len(processing_state["errors"])
+        processed_count = sum(
+            status == "processed" for status in processing_state["statuses"]
+        )
+        completion_title = (
+            "All Bills Processed Successfully"
+            if error_count == 0
+            else "Processing Complete"
+        )
+        st.markdown(f'<h2 class="scan-heading">{completion_title}</h2>', unsafe_allow_html=True)
+        st.markdown(
+            f'<p class="scan-subtitle">All {total_files} uploaded bills have been reviewed.</p>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f"""
+            <div class="processing-stats">
+                <div class="processing-stat"><span>Total Bills</span><strong>{total_files}</strong></div>
+                <div class="processing-stat"><span>Processed</span><strong>{processed_count}</strong></div>
+                <div class="processing-stat"><span>Duplicates</span><strong>{duplicate_count}</strong></div>
+                <div class="processing-stat"><span>Errors Skipped</span><strong>{error_count}</strong></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if duplicate_count and processing_state["duplicate_decision"] is None:
+            st.markdown(
+                f"""
+                <div class="duplicate-card">
+                    <strong>{duplicate_count} duplicate invoice{'s' if duplicate_count != 1 else ''} detected</strong><br>
+                    Choose whether to include them in the spreadsheets or use unique invoices only.
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-            store_processed_uploads(files_selected_for_processing, DATABASE_PATH)
-            for accepted_record in accepted_records:
-                log_processed_invoice(
-                    accepted_record.get(
-                        "Invoice No.",
-                        accepted_record.get("Invoice No", ""),
+            with st.expander(f"Review Duplicates ({duplicate_count})"):
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "File": duplicate.get("filename", ""),
+                                "Invoice Number": duplicate["record"].get("Invoice No.", ""),
+                                "Customer": duplicate["record"].get("Customer Name", ""),
+                                "Previously Processed": duplicate["previous"].get(
+                                    "processed_timestamp", ""
+                                ),
+                            }
+                            for duplicate in processing_state["duplicates"]
+                        ]
                     ),
-                    DATABASE_PATH,
+                    use_container_width=True,
+                    hide_index=True,
                 )
-            st.session_state["bill_data"] = pd.DataFrame(
-                accepted_records,
-                columns=COLUMNS,
-            )
-            st.session_state["processing_new_count"] = len(accepted_records)
-            st.session_state["duplicate_invoices"] = duplicates
-            st.session_state["show_duplicate_invoice_details"] = False
-        except json.JSONDecodeError:
-            st.error("Gemini returned invalid JSON. Please try processing again.")
-        except Exception as error:
-            st.error(f"Failed to process bills: {error}")
+            include_column, unique_column = st.columns(2)
+            if include_column.button(
+                "Include Duplicates",
+                type="primary",
+                use_container_width=True,
+                key="include_all_duplicates",
+            ):
+                processing_state = include_duplicate_records(processing_state)
+                publish_processing_results(processing_state)
+                st.session_state[PROCESSING_STATE_KEY] = processing_state
+                st.rerun()
+            if unique_column.button(
+                "Skip All Duplicates",
+                use_container_width=True,
+                key="skip_all_duplicates",
+            ):
+                processing_state["duplicate_decision"] = "skip"
+                publish_processing_results(processing_state)
+                st.session_state[PROCESSING_STATE_KEY] = processing_state
+                st.rerun()
+        else:
+            if processing_state["duplicate_decision"] is None:
+                processing_state["duplicate_decision"] = "none"
+            if not processing_state.get("results_published"):
+                publish_processing_results(processing_state)
+                st.session_state[PROCESSING_STATE_KEY] = processing_state
 
-render_processing_summary(DATABASE_PATH)
+            create_column, view_column = st.columns([1.5, 1])
+            if create_column.button(
+                "Create Excel Spreadsheets",
+                type="primary",
+                use_container_width=True,
+                disabled=not processing_state["records"],
+                key="create_processing_spreadsheets",
+            ):
+                processing_state["show_results"] = True
+                st.session_state["show_processing_results"] = True
+                st.session_state[PROCESSING_STATE_KEY] = processing_state
+                st.rerun()
+            if view_column.button(
+                "View Processed Bills",
+                use_container_width=True,
+                disabled=not processing_state["records"],
+                key="view_completed_bills",
+            ):
+                processing_state["show_results"] = True
+                st.session_state["show_processing_results"] = True
+                st.session_state[PROCESSING_STATE_KEY] = processing_state
+                st.rerun()
 
-if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
+    st.markdown("</div>", unsafe_allow_html=True)
+
+if (
+    st.session_state.get("show_processing_results", False)
+    and "bill_data" in st.session_state
+    and not st.session_state["bill_data"].empty
+):
     st.subheader("Review & Edit Extracted Data")
 
     # Sessions can survive a Streamlit Cloud code redeploy. Refresh any table
@@ -1107,7 +1491,12 @@ if "bill_data" in st.session_state and not st.session_state["bill_data"].empty:
         num_rows="dynamic",
         use_container_width=True,
         hide_index=True,
-        key="billing_review_september_2026_tariff",
+        key=(
+            "billing_review_"
+            + st.session_state.get(PROCESSING_STATE_KEY, {}).get(
+                "signature", "legacy"
+            )[:12]
+        ),
     )
 
     st.session_state["bill_data"] = edited_df

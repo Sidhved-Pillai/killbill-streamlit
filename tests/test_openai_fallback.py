@@ -49,7 +49,7 @@ def test_all_gemini_models_failing_never_calls_openai(monkeypatch):
     _configure_gemini(monkeypatch, BusyModels())
     monkeypatch.setattr(app, "MAX_RETRIES", 1)
 
-    with pytest.raises(RuntimeError, match="available Gemini models"):
+    with pytest.raises(RuntimeError, match="available models"):
         app.analyze_bills([SimpleNamespace(name="bill.jpeg")])
 
     assert requested_models == app.MODEL_FALLBACKS
@@ -67,7 +67,7 @@ def test_zero_record_responses_end_with_gemini_error(monkeypatch):
     _configure_gemini(monkeypatch, EmptyModels())
     monkeypatch.setattr(app, "parse_gemini_response", lambda text: [])
 
-    with pytest.raises(RuntimeError, match="available Gemini models"):
+    with pytest.raises(RuntimeError, match="available models"):
         app.analyze_bills([SimpleNamespace(name="bill.jpeg")])
 
 
@@ -80,9 +80,9 @@ def test_gemini_deadline_returns_retry_message(monkeypatch):
             )
         ),
     )
-    monkeypatch.setattr(app.time, "monotonic", iter([0.0, 181.0, 181.0]).__next__)
+    monkeypatch.setattr(app.time, "monotonic", iter([0.0, 61.0, 61.0]).__next__)
 
-    with pytest.raises(RuntimeError, match="within 3 minutes"):
+    with pytest.raises(RuntimeError, match="within 1 minute"):
         app.analyze_bills([SimpleNamespace(name="bill.jpeg")])
 
 

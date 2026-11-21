@@ -13,7 +13,7 @@ import pypdf
 import streamlit as st
 from google import genai
 from google.genai import types
-from PIL import Image
+from PIL import Image, ImageOps
 
 from customer_master import (
     apply_customer_master_lookup,
@@ -456,8 +456,9 @@ MIME_TYPES = {
 }
 
 SYSTEM_INSTRUCTION = """
-You are auditing a combined batch of logistics delivery sheets for Ubiquity Transtech.
-Scan all attached documents together and extract every single distinct trip row you find across all files.
+Read this single Bisleri logistics invoice only. Perform targeted extraction for the
+spreadsheet fields below. Ignore prices, taxes, totals, GST calculations, signatures,
+terms, bank details, and all other invoice content.
 
 Return ONLY a single valid JSON list of objects. Each object represents one invoice trip row and must contain exactly these keys:
 - "Date" (format: DD-MMM-YY, e.g. 25-May-26)
@@ -474,7 +475,7 @@ Return ONLY a single valid JSON list of objects. Each object represents one invo
 - "items" (an array of product-line objects)
 
 Rules:
-- Treat all attached documents as one consolidated batch and aggregate the final result across the whole upload.
+- Return one object for each invoice visible in the supplied file. Normally there is exactly one.
 - Extract the "Shipped To" section in this exact order: Customer Code, Customer Name, address lines, then administrative fields.
 - "Loading Point": extract the invoice origin from the "Shipped From" section only. Normalize it to exactly one of Thane, Vasai, Andheri, Vidya Vihar, Bhiwandi, Kandivali, PRPL, Wada, Mahul, Khopoli, Kamshet, or Ambernath. Use null when it cannot be determined.
 - "Customer Code": extract only the value after "Customer Code :" (or "Customer Code:") in the "Shipped To" section. Do not use any other identifier.
@@ -482,7 +483,7 @@ Rules:
 - "To": begin immediately AFTER the Customer Name. Concatenate every subsequent physical-address line, in order, into one value. Stop before the first administrative field: State Code, GSTIN, PAN, Phone, Email, FSSAI, Payment Terms, or any tax identifier.
 - "To" must contain delivery-address text only. Never include Customer Name, Customer Code, GSTIN, or any administrative field or value.
 - Example: for "Customer Code : MUMCO02703" followed by "SANTKRIPA DUGDHALAYA(KALYAN-E)", then "GODAVARI BLDG SHOP NO 4 LOKGRAM", "KALYAN CITY NETIVALI KALYAN EAST", "THANE 421306", and then "State Code : MH": Customer Name is "SANTKRIPA DUGDHALAYA(KALYAN-E)" and To is "GODAVARI BLDG SHOP NO 4 LOKGRAM, KALYAN CITY, NETIVALI, KALYAN EAST, THANE 421306".
-- Extract EVERY product line exactly as printed on the invoice into "items". Each item must contain exactly "description" (the complete printed product description) and "qty" (the printed quantity).
+- In the product table, read only the product description and quantity columns. Return them in "items"; each item must contain exactly "description" and "qty".
 - Keep every product row separate. Never combine rows, total quantities, or classify any item as Case or Jar.
 - Always include "Case" and "Jar" with a value of 0. Do not calculate their totals; their values will be calculated from "items" after extraction.
 - Vehicle Type should default to "9MT" when it is not clearly visible.
@@ -492,11 +493,19 @@ Rules:
 
 def file_to_part(uploaded_file):
     file_bytes = uploaded_file.getvalue()
-    extension = uploaded_file.name.rsplit(".", 1)[-1].lower()
+    extension = str(uploaded_file.name).rsplit(".", 1)[-1].lower()
     mime_type = MIME_TYPES[extension]
 
     if extension in {"png", "jpg", "jpeg"}:
-        Image.open(io.BytesIO(file_bytes))
+        with Image.open(io.BytesIO(file_bytes)) as image:
+            image = ImageOps.exif_transpose(image)
+            image.thumbnail((1800, 1800), Image.Resampling.LANCZOS)
+            if image.mode not in {"RGB", "L"}:
+                image = image.convert("RGB")
+            optimized = io.BytesIO()
+            image.save(optimized, format="JPEG", quality=85, optimize=True)
+            file_bytes = optimized.getvalue()
+            mime_type = "image/jpeg"
     elif extension == "pdf":
         pypdf.PdfReader(io.BytesIO(file_bytes))
 
@@ -673,6 +682,9 @@ def analyze_bills(uploaded_files):
                     config=types.GenerateContentConfig(
                         system_instruction=SYSTEM_INSTRUCTION,
                         response_mime_type="application/json",
+                        temperature=0,
+                        max_output_tokens=4096,
+                        media_resolution=types.MediaResolution.MEDIA_RESOLUTION_MEDIUM,
                         http_options=types.HttpOptions(
                             timeout=max(1, int(remaining_seconds * 1000)),
                             retry_options=types.HttpRetryOptions(attempts=1),
@@ -790,7 +802,7 @@ def log_processed_invoice(invoice_no, database_path=DATABASE_PATH):
 def processing_batch_signature(uploaded_files):
     """Identify the exact ordered upload selection across Streamlit reruns."""
     return "|".join(
-        f"{uploaded_file.name}:{upload_digest(uploaded_file)}"
+        f"{str(uploaded_file.name)}:{upload_digest(uploaded_file)}"
         for uploaded_file in uploaded_files
     )
 
@@ -799,7 +811,7 @@ def create_processing_state(uploaded_files):
     """Create resumable per-file processing state for one upload selection."""
     return {
         "signature": processing_batch_signature(uploaded_files),
-        "file_names": [uploaded_file.name for uploaded_file in uploaded_files],
+        "file_names": [str(uploaded_file.name) for uploaded_file in uploaded_files],
         "statuses": ["pending"] * len(uploaded_files),
         "current_index": 0,
         "records": [],
@@ -850,7 +862,7 @@ def process_next_invoice(uploaded_files, state):
             )
         for duplicate in duplicates:
             duplicate_entry = duplicate.copy()
-            duplicate_entry["filename"] = uploaded_file.name
+            duplicate_entry["filename"] = str(uploaded_file.name)
             duplicate_entry["file_index"] = index
             state["duplicates"].append(duplicate_entry)
         state["records"].extend(accepted_records)
@@ -869,7 +881,7 @@ def process_next_invoice(uploaded_files, state):
         )
         error_entry = {
             "file_index": index,
-            "filename": uploaded_file.name,
+            "filename": str(uploaded_file.name),
             "message": (
                 "We couldn't read this invoice. The image may be unclear, cropped, "
                 "or Gemini may be temporarily busy."
@@ -1289,7 +1301,7 @@ if selection_matches:
         current_index = processing_state["current_index"]
         if current_index < total_files:
             current_file = uploaded_files[current_index]
-            safe_current_filename = html.escape(current_file.name)
+            safe_current_filename = html.escape(str(current_file.name or "Invoice"))
             st.markdown(
                 f"""
                 <div class="current-file-card">
@@ -1313,17 +1325,29 @@ if selection_matches:
 
     elif processing_state["status"] == "error":
         error = processing_state["current_error"]
-        safe_error_filename = html.escape(error["filename"])
+        safe_error_filename = html.escape(str(error.get("filename") or "Invoice"))
+        safe_error_message = html.escape(
+            str(error.get("message") or "This invoice could not be read.")
+        )
         st.markdown(
             f"""
             <div class="processing-error-card">
                 <strong>Error at bill {error['file_index'] + 1} of {total_files}</strong><br>
                 {safe_error_filename}<br>
-                {error['message']}
+                {safe_error_message}
             </div>
             """,
             unsafe_allow_html=True,
         )
+        if processing_state["records"]:
+            with st.expander(
+                f"View {len(processing_state['records'])} invoices processed so far"
+            ):
+                st.dataframe(
+                    pd.DataFrame(processing_state["records"], columns=COLUMNS),
+                    use_container_width=True,
+                    hide_index=True,
+                )
         retry_column, skip_column = st.columns(2)
         if retry_column.button(
             f"Retry Bill {error['file_index'] + 1}",

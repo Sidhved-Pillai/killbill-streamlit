@@ -134,3 +134,18 @@ def test_upload_signature_changes_when_order_or_content_changes():
     assert app.processing_batch_signature([
         FakeUpload("bill-1.jpg", b"changed"), *files[1:]
     ]) != original
+
+
+def test_failure_normalizes_non_string_filename_for_error_ui(monkeypatch):
+    file = FakeUpload(12345, b"invoice")
+    monkeypatch.setattr(
+        app,
+        "analyze_bills",
+        lambda files: (_ for _ in ()).throw(RuntimeError("temporary failure")),
+    )
+    state = app.create_processing_state([file])
+
+    app.process_next_invoice([file], state)
+
+    assert state["status"] == "error"
+    assert state["current_error"]["filename"] == "12345"

@@ -88,6 +88,17 @@ def test_two_invoice_window_keeps_requests_separate_and_persists_in_order(monkey
     assert state["statuses"] == ["processed", "processed", "processed"]
 
 
+def test_eta_uses_active_scan_time_and_remaining_invoice_count():
+    state = {
+        "scan_elapsed_seconds": 240,
+        "scan_attempts_completed": 8,
+    }
+
+    assert app.estimated_time_remaining_text(state, 22) == "~ 11 min"
+    assert app.estimated_time_remaining_text(state, 0) == "Complete"
+    assert app.estimated_time_remaining_text({}, 44) == "Calculating…"
+
+
 def test_failure_does_not_pause_later_bills_and_retry_only_retries_failure(monkeypatch):
     progress = ProcessingProgress(monkeypatch, fail_once="bill-2.jpg")
     files = uploads()

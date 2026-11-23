@@ -427,8 +427,32 @@ PREMIUM_CSS = """
         font-size: 1.75rem;
     }
 
+    .progress-summary {
+        display: grid;
+        grid-template-columns: 1fr auto 1fr;
+        align-items: center;
+        gap: 1rem;
+        margin: 1rem 0 .45rem;
+        color: #111111;
+        font-weight: 800;
+    }
+
+    .progress-summary .progress-percent { text-align: right; }
+    .eta-pill {
+        padding: .5rem .9rem;
+        border-radius: 999px;
+        background: #f0f1f5;
+        color: #111827;
+        font-size: .92rem;
+        white-space: nowrap;
+    }
+
+    .eta-clock { margin-right: .4rem; font-size: 1.05rem; }
+
     @media (max-width: 760px) {
         .processing-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .progress-summary { grid-template-columns: 1fr auto; }
+        .eta-pill { grid-column: 1 / -1; grid-row: 2; text-align: center; }
         .premium-title { font-size: 2.35rem; }
         .invoice-illustration { transform: scale(.86); margin-bottom: 0; }
     }
@@ -836,6 +860,8 @@ def create_processing_state(uploaded_files):
         "status": "running",
         "duplicate_decision": None,
         "show_results": False,
+        "scan_elapsed_seconds": 0.0,
+        "scan_attempts_completed": 0,
     }
 
 
@@ -930,9 +956,17 @@ def process_invoice_window(uploaded_files, state, worker_count=INVOICE_SCAN_WORK
         except Exception as error:
             return None, error
 
+    window_started_at = time.monotonic()
     with ThreadPoolExecutor(max_workers=len(pending_indexes)) as executor:
         futures = {index: executor.submit(extract, index) for index in pending_indexes}
         outcomes = {index: futures[index].result() for index in pending_indexes}
+    window_elapsed = time.monotonic() - window_started_at
+    state["scan_elapsed_seconds"] = (
+        float(state.get("scan_elapsed_seconds", 0.0)) + window_elapsed
+    )
+    state["scan_attempts_completed"] = (
+        int(state.get("scan_attempts_completed", 0)) + len(pending_indexes)
+    )
 
     for index in pending_indexes:
         records, error = outcomes[index]
@@ -957,6 +991,19 @@ def process_invoice_window(uploaded_files, state, worker_count=INVOICE_SCAN_WORK
 def process_next_invoice(uploaded_files, state):
     """Compatibility helper that processes one pending invoice."""
     return process_invoice_window(uploaded_files, state, worker_count=1)
+
+
+def estimated_time_remaining_text(state, remaining_invoices):
+    """Return a stable, active-processing ETA for the progress display."""
+    completed_attempts = int(state.get("scan_attempts_completed", 0))
+    elapsed_seconds = float(state.get("scan_elapsed_seconds", 0.0))
+    if remaining_invoices <= 0:
+        return "Complete"
+    if completed_attempts <= 0 or elapsed_seconds <= 0:
+        return "Calculating…"
+    remaining_seconds = elapsed_seconds / completed_attempts * remaining_invoices
+    remaining_minutes = max(1, int((remaining_seconds + 59) // 60))
+    return f"~ {remaining_minutes} min"
 
 
 def retry_failed_invoices(state):
@@ -1389,10 +1436,21 @@ if selection_matches:
             '<p class="scan-subtitle">Scanning and extracting each Bisleri bill individually</p>',
             unsafe_allow_html=True,
         )
-        st.progress(
-            progress_value,
-            text=f"{scanned_files} of {total_files} bills scanned · {round(progress_value * 100)}%",
+        eta_text = estimated_time_remaining_text(
+            processing_state,
+            total_files - scanned_files,
         )
+        st.markdown(
+            f"""
+            <div class="progress-summary">
+                <span>{scanned_files} of {total_files} bills processed</span>
+                <span class="eta-pill"><span class="eta-clock">◷</span>Estimated time remaining: {eta_text}</span>
+                <span class="progress-percent">{round(progress_value * 100)}%</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.progress(progress_value)
 
     if processing_state["status"] == "running":
         current_index = processing_state["current_index"]

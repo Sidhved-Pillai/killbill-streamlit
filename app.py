@@ -102,8 +102,10 @@ PREMIUM_CSS = """
     [data-testid="stDecoration"],
     [data-testid="stToolbar"],
     [data-testid="stAppDeployButton"],
+    [data-testid="stStatusWidget"],
     #MainMenu,
     [data-testid="stAppViewerBadge"],
+    [class*="StatusWidget"],
     [class*="viewerBadge_container"],
     [class*="viewerBadge_link"],
     [data-testid="stAppViewContainer"] > footer {

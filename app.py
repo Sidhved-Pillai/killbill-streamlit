@@ -97,6 +97,19 @@ PREMIUM_CSS = """
         display: none !important;
     }
 
+    /* Hide Streamlit's toolbar and hosted viewer badge. */
+    [data-testid="stHeader"],
+    [data-testid="stDecoration"],
+    [data-testid="stToolbar"],
+    [data-testid="stAppDeployButton"],
+    #MainMenu,
+    [data-testid="stAppViewerBadge"],
+    [class*="viewerBadge_container"],
+    [class*="viewerBadge_link"],
+    [data-testid="stAppViewContainer"] > footer {
+        display: none !important;
+    }
+
     .main .block-container {
         max-width: 1180px;
         padding-top: 2rem;

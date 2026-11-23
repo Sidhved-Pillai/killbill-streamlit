@@ -69,45 +69,45 @@ def test_each_invoice_is_sent_in_its_own_request(monkeypatch):
     assert [record["Invoice No."] for record in state["records"]] == progress.calls
 
 
-def test_failure_pauses_exact_bill_then_retry_resumes(monkeypatch):
+def test_failure_does_not_pause_later_bills_and_retry_only_retries_failure(monkeypatch):
     progress = ProcessingProgress(monkeypatch, fail_once="bill-2.jpg")
     files = uploads()
     state = app.create_processing_state(files)
 
-    app.process_next_invoice(files, state)
-    app.process_next_invoice(files, state)
+    while state["status"] == "running":
+        app.process_next_invoice(files, state)
 
-    assert progress.calls == ["bill-1.jpg", "bill-2.jpg"]
-    assert state["status"] == "error"
-    assert state["current_index"] == 1
-    assert state["current_error"]["filename"] == "bill-2.jpg"
-    assert len(state["records"]) == 1
+    assert progress.calls == ["bill-1.jpg", "bill-2.jpg", "bill-3.jpg"]
+    assert state["status"] == "complete"
+    assert state["statuses"] == ["processed", "failed", "processed"]
+    assert state["errors"]["1"]["filename"] == "bill-2.jpg"
+    assert len(state["records"]) == 2
 
-    app.retry_current_invoice(state)
-    app.process_next_invoice(files, state)
-    app.process_next_invoice(files, state)
+    app.retry_failed_invoices(state)
+    while state["status"] == "running":
+        app.process_next_invoice(files, state)
 
     assert progress.calls == [
-        "bill-1.jpg", "bill-2.jpg", "bill-2.jpg", "bill-3.jpg"
+        "bill-1.jpg", "bill-2.jpg", "bill-3.jpg", "bill-2.jpg"
     ]
     assert state["status"] == "complete"
     assert state["current_index"] == 3
     assert state["errors"] == {}
 
 
-def test_skip_failed_invoice_keeps_prior_results_and_advances(monkeypatch):
+def test_multiple_failures_are_collected_without_manual_skips(monkeypatch):
     ProcessingProgress(monkeypatch, fail_once="bill-2.jpg")
     files = uploads()
     state = app.create_processing_state(files)
-    app.process_next_invoice(files, state)
-    app.process_next_invoice(files, state)
+    while state["status"] == "running":
+        app.process_next_invoice(files, state)
 
-    app.skip_current_invoice(state, len(files))
-
-    assert state["statuses"] == ["processed", "skipped", "pending"]
-    assert state["current_index"] == 2
-    assert state["status"] == "running"
-    assert [record["Invoice No."] for record in state["records"]] == ["bill-1.jpg"]
+    assert state["statuses"] == ["processed", "failed", "processed"]
+    assert state["current_index"] == 3
+    assert state["status"] == "complete"
+    assert [record["Invoice No."] for record in state["records"]] == [
+        "bill-1.jpg", "bill-3.jpg"
+    ]
 
 
 def test_duplicate_is_collected_without_stopping_later_files(monkeypatch):
@@ -136,7 +136,7 @@ def test_upload_signature_changes_when_order_or_content_changes():
     ]) != original
 
 
-def test_failure_normalizes_non_string_filename_for_error_ui(monkeypatch):
+def test_failure_normalizes_non_string_filename(monkeypatch):
     file = FakeUpload(12345, b"invoice")
     monkeypatch.setattr(
         app,
@@ -147,5 +147,25 @@ def test_failure_normalizes_non_string_filename_for_error_ui(monkeypatch):
 
     app.process_next_invoice([file], state)
 
-    assert state["status"] == "error"
-    assert state["current_error"]["filename"] == "12345"
+    assert state["status"] == "complete"
+    assert state["errors"]["0"]["filename"] == "12345"
+
+
+def test_gemini_billing_failure_stops_once_without_skipping_invoice(monkeypatch):
+    files = uploads()
+    calls = []
+
+    def billing_failure(selected_files):
+        calls.append(selected_files[0].name)
+        raise app.GeminiBillingError("credits depleted")
+
+    monkeypatch.setattr(app, "analyze_bills", billing_failure)
+    state = app.create_processing_state(files)
+
+    app.process_next_invoice(files, state)
+
+    assert calls == ["bill-1.jpg"]
+    assert state["status"] == "service_error"
+    assert state["current_index"] == 0
+    assert state["statuses"] == ["pending", "pending", "pending"]
+    assert state["errors"] == {}

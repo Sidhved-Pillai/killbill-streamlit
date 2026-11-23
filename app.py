@@ -491,6 +491,17 @@ Rules:
 """.strip()
 
 
+class GeminiBillingError(RuntimeError):
+    """The configured Gemini project cannot make requests until billing is restored."""
+
+
+def is_gemini_billing_error(error):
+    error_text = f"{type(error).__name__}: {error}".lower()
+    return "prepayment credits are depleted" in error_text or (
+        "402" in error_text and "resource_exhausted" in error_text
+    )
+
+
 def file_to_part(uploaded_file):
     file_bytes = uploaded_file.getvalue()
     extension = str(uploaded_file.name).rsplit(".", 1)[-1].lower()
@@ -682,9 +693,6 @@ def analyze_bills(uploaded_files):
                     config=types.GenerateContentConfig(
                         system_instruction=SYSTEM_INSTRUCTION,
                         response_mime_type="application/json",
-                        temperature=0,
-                        max_output_tokens=4096,
-                        media_resolution=types.MediaResolution.MEDIA_RESOLUTION_MEDIUM,
                         http_options=types.HttpOptions(
                             timeout=max(1, int(remaining_seconds * 1000)),
                             retry_options=types.HttpRetryOptions(attempts=1),
@@ -699,6 +707,11 @@ def analyze_bills(uploaded_files):
             except Exception as e:
                 last_error = e
                 error_text = str(e).lower()
+
+                if is_gemini_billing_error(e):
+                    raise GeminiBillingError(
+                        "The Gemini API project has no available billing credit."
+                    ) from e
 
                 if "not_found" in error_text or "not found" in error_text:
                     print(f"Gemini model unavailable: {model_name}")
@@ -836,6 +849,9 @@ def enrich_invoice_records(records):
 def process_next_invoice(uploaded_files, state):
     """Process exactly one file, preserving all earlier results on failure."""
     index = state["current_index"]
+    while index < len(uploaded_files) and state["statuses"][index] != "pending":
+        index += 1
+    state["current_index"] = index
     if index >= len(uploaded_files):
         state["status"] = "complete"
         return state
@@ -874,10 +890,19 @@ def process_next_invoice(uploaded_files, state):
         state["current_index"] += 1
         if state["current_index"] >= len(uploaded_files):
             state["status"] = "complete"
+    except GeminiBillingError as error:
+        print(f"Gemini billing unavailable: {str(error)[:500]}")
+        state["statuses"][index] = "pending"
+        state["current_error"] = {
+            "file_index": index,
+            "filename": str(uploaded_file.name),
+            "message": "Gemini API credits are depleted.",
+        }
+        state["status"] = "service_error"
     except Exception as error:
         print(
             f"Invoice processing failed for {uploaded_file.name}: "
-            f"{type(error).__name__}"
+            f"{type(error).__name__}: {str(error)[:500]}"
         )
         error_entry = {
             "file_index": index,
@@ -887,10 +912,29 @@ def process_next_invoice(uploaded_files, state):
                 "or Gemini may be temporarily busy."
             ),
         }
-        state["statuses"][index] = "error"
+        state["statuses"][index] = "failed"
         state["errors"][str(index)] = error_entry
-        state["current_error"] = error_entry
-        state["status"] = "error"
+        state["current_error"] = None
+        state["current_index"] += 1
+        state["status"] = (
+            "complete" if state["current_index"] >= len(uploaded_files) else "running"
+        )
+    return state
+
+
+def retry_failed_invoices(state):
+    """Queue every failed invoice for another pass without repeating successes."""
+    failed_indexes = sorted(int(index) for index in state.get("errors", {}))
+    if not failed_indexes:
+        return state
+    for index in failed_indexes:
+        state["statuses"][index] = "pending"
+    state["errors"] = {}
+    state["current_error"] = None
+    state["current_index"] = failed_indexes[0]
+    state["status"] = "running"
+    state["results_published"] = False
+    state["show_results"] = False
     return state
 
 
@@ -1277,11 +1321,24 @@ if start_clicked:
 if selection_matches:
     processing_state = st.session_state[PROCESSING_STATE_KEY]
     total_files = len(uploaded_files)
+    # Continue sessions created by the previous pause-on-error workflow.
+    if processing_state.get("status") == "error" and processing_state.get("current_error"):
+        legacy_error = processing_state["current_error"]
+        failed_index = legacy_error["file_index"]
+        processing_state["statuses"][failed_index] = "failed"
+        processing_state["errors"][str(failed_index)] = legacy_error
+        processing_state["current_error"] = None
+        processing_state["current_index"] = failed_index + 1
+        processing_state["status"] = (
+            "complete" if processing_state["current_index"] >= total_files else "running"
+        )
+        st.session_state[PROCESSING_STATE_KEY] = processing_state
+        st.rerun()
     scanned_files = processing_state["current_index"]
     progress_value = scanned_files / total_files if total_files else 0
 
     st.markdown('<div class="scan-panel">', unsafe_allow_html=True)
-    if processing_state["status"] in {"running", "error", "cancelled"}:
+    if processing_state["status"] in {"running", "error", "service_error", "cancelled"}:
         heading = (
             "Processing Invoices..."
             if processing_state["status"] == "running"
@@ -1320,6 +1377,24 @@ if selection_matches:
                 st.rerun()
 
             processing_state = process_next_invoice(uploaded_files, processing_state)
+            st.session_state[PROCESSING_STATE_KEY] = processing_state
+            st.rerun()
+
+    elif processing_state["status"] == "service_error":
+        st.error(
+            "Invoice scanning is temporarily unavailable because the configured "
+            "Gemini API project has depleted its prepaid credits. No bills were "
+            "skipped. Restore the Gemini balance or replace GOOGLE_API_KEY in "
+            "Streamlit secrets, reboot the app, and then retry this batch."
+        )
+        if st.button(
+            "Retry Batch",
+            type="primary",
+            use_container_width=True,
+            key="retry_after_gemini_billing_error",
+        ):
+            processing_state["current_error"] = None
+            processing_state["status"] = "running"
             st.session_state[PROCESSING_STATE_KEY] = processing_state
             st.rerun()
 
@@ -1404,11 +1479,34 @@ if selection_matches:
                 <div class="processing-stat"><span>Total Bills</span><strong>{total_files}</strong></div>
                 <div class="processing-stat"><span>Processed</span><strong>{processed_count}</strong></div>
                 <div class="processing-stat"><span>Duplicates</span><strong>{duplicate_count}</strong></div>
-                <div class="processing-stat"><span>Errors Skipped</span><strong>{error_count}</strong></div>
+                <div class="processing-stat"><span>Failed</span><strong>{error_count}</strong></div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+
+        if error_count:
+            failed_files = [
+                error.get("filename", "Invoice")
+                for error in processing_state["errors"].values()
+            ]
+            st.warning(
+                f"{error_count} invoice{'s' if error_count != 1 else ''} could not be read. "
+                "The rest of the batch finished without interruption."
+            )
+            with st.expander(f"Review Failed Bills ({error_count})"):
+                for failed_file in failed_files:
+                    st.write(f"• {failed_file}")
+            if st.button(
+                "Retry Failed Bills",
+                type="primary",
+                use_container_width=True,
+                key="retry_all_failed_invoices",
+            ):
+                processing_state = retry_failed_invoices(processing_state)
+                st.session_state[PROCESSING_STATE_KEY] = processing_state
+                st.session_state.pop("show_processing_results", None)
+                st.rerun()
 
         if duplicate_count and processing_state["duplicate_decision"] is None:
             st.markdown(

@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -79,6 +80,7 @@ INITIAL_BACKOFF_SECONDS = 4
 GEMINI_TOTAL_TIMEOUT_SECONDS = 60
 DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "billing_history.db")
 PROCESSING_STATE_KEY = "invoice_processing_batch"
+INVOICE_SCAN_WORKERS = 2
 
 PREMIUM_CSS = """
 <style>
@@ -846,51 +848,42 @@ def enrich_invoice_records(records):
     return apply_freight_rate_revision(records)
 
 
-def process_next_invoice(uploaded_files, state):
-    """Process exactly one file, preserving all earlier results on failure."""
-    index = state["current_index"]
-    while index < len(uploaded_files) and state["statuses"][index] != "pending":
-        index += 1
-    state["current_index"] = index
-    if index >= len(uploaded_files):
+def _advance_processing_cursor(state):
+    pending_indexes = [
+        index for index, status in enumerate(state["statuses"])
+        if status == "pending"
+    ]
+    state["current_index"] = pending_indexes[0] if pending_indexes else len(state["statuses"])
+    if not pending_indexes and state.get("status") == "running":
         state["status"] = "complete"
-        return state
 
-    uploaded_file = uploaded_files[index]
-    state["statuses"][index] = "processing"
-    try:
-        records = analyze_bills([uploaded_file])
-        if not records:
-            raise ValueError("No invoice data was found in this file.")
-        records = enrich_invoice_records(records)
-        accepted_records, duplicates = store_new_invoice_records(
-            records,
+
+def _store_extracted_invoice(uploaded_file, index, state, records):
+    if not records:
+        raise ValueError("No invoice data was found in this file.")
+    records = enrich_invoice_records(records)
+    accepted_records, duplicates = store_new_invoice_records(records, DATABASE_PATH)
+    store_processed_uploads([uploaded_file], DATABASE_PATH)
+    for accepted_record in accepted_records:
+        log_processed_invoice(
+            accepted_record.get("Invoice No.", accepted_record.get("Invoice No", "")),
             DATABASE_PATH,
         )
-        store_processed_uploads([uploaded_file], DATABASE_PATH)
-        for accepted_record in accepted_records:
-            log_processed_invoice(
-                accepted_record.get(
-                    "Invoice No.",
-                    accepted_record.get("Invoice No", ""),
-                ),
-                DATABASE_PATH,
-            )
-        for duplicate in duplicates:
-            duplicate_entry = duplicate.copy()
-            duplicate_entry["filename"] = str(uploaded_file.name)
-            duplicate_entry["file_index"] = index
-            state["duplicates"].append(duplicate_entry)
-        state["records"].extend(accepted_records)
-        state["statuses"][index] = (
-            "duplicate" if duplicates and not accepted_records else "processed"
-        )
-        state["errors"].pop(str(index), None)
-        state["current_error"] = None
-        state["current_index"] += 1
-        if state["current_index"] >= len(uploaded_files):
-            state["status"] = "complete"
-    except GeminiBillingError as error:
+    for duplicate in duplicates:
+        duplicate_entry = duplicate.copy()
+        duplicate_entry["filename"] = str(uploaded_file.name)
+        duplicate_entry["file_index"] = index
+        state["duplicates"].append(duplicate_entry)
+    state["records"].extend(accepted_records)
+    state["statuses"][index] = (
+        "duplicate" if duplicates and not accepted_records else "processed"
+    )
+    state["errors"].pop(str(index), None)
+    state["current_error"] = None
+
+
+def _record_invoice_failure(uploaded_file, index, state, error):
+    if isinstance(error, GeminiBillingError):
         print(f"Gemini billing unavailable: {str(error)[:500]}")
         state["statuses"][index] = "pending"
         state["current_error"] = {
@@ -899,27 +892,71 @@ def process_next_invoice(uploaded_files, state):
             "message": "Gemini API credits are depleted.",
         }
         state["status"] = "service_error"
-    except Exception as error:
-        print(
-            f"Invoice processing failed for {uploaded_file.name}: "
-            f"{type(error).__name__}: {str(error)[:500]}"
-        )
-        error_entry = {
-            "file_index": index,
-            "filename": str(uploaded_file.name),
-            "message": (
-                "We couldn't read this invoice. The image may be unclear, cropped, "
-                "or Gemini may be temporarily busy."
-            ),
-        }
-        state["statuses"][index] = "failed"
-        state["errors"][str(index)] = error_entry
-        state["current_error"] = None
-        state["current_index"] += 1
-        state["status"] = (
-            "complete" if state["current_index"] >= len(uploaded_files) else "running"
-        )
+        return
+
+    print(
+        f"Invoice processing failed for {uploaded_file.name}: "
+        f"{type(error).__name__}: {str(error)[:500]}"
+    )
+    state["statuses"][index] = "failed"
+    state["errors"][str(index)] = {
+        "file_index": index,
+        "filename": str(uploaded_file.name),
+        "message": (
+            "We couldn't read this invoice. The image may be unclear, cropped, "
+            "or Gemini may be temporarily busy."
+        ),
+    }
+    state["current_error"] = None
+
+
+def process_invoice_window(uploaded_files, state, worker_count=INVOICE_SCAN_WORKERS):
+    """Extract a small window concurrently, then persist results in file order."""
+    pending_indexes = [
+        index for index, status in enumerate(state["statuses"])
+        if status == "pending"
+    ][:worker_count]
+    if not pending_indexes:
+        state["status"] = "complete"
+        _advance_processing_cursor(state)
+        return state
+
+    for index in pending_indexes:
+        state["statuses"][index] = "processing"
+
+    def extract(index):
+        try:
+            return analyze_bills([uploaded_files[index]]), None
+        except Exception as error:
+            return None, error
+
+    with ThreadPoolExecutor(max_workers=len(pending_indexes)) as executor:
+        futures = {index: executor.submit(extract, index) for index in pending_indexes}
+        outcomes = {index: futures[index].result() for index in pending_indexes}
+
+    for index in pending_indexes:
+        records, error = outcomes[index]
+        uploaded_file = uploaded_files[index]
+        if error is None:
+            try:
+                _store_extracted_invoice(uploaded_file, index, state, records)
+            except Exception as storage_error:
+                _record_invoice_failure(uploaded_file, index, state, storage_error)
+        else:
+            _record_invoice_failure(uploaded_file, index, state, error)
+        if state["status"] == "service_error":
+            for remaining_index in pending_indexes:
+                if state["statuses"][remaining_index] == "processing":
+                    state["statuses"][remaining_index] = "pending"
+            break
+
+    _advance_processing_cursor(state)
     return state
+
+
+def process_next_invoice(uploaded_files, state):
+    """Compatibility helper that processes one pending invoice."""
+    return process_invoice_window(uploaded_files, state, worker_count=1)
 
 
 def retry_failed_invoices(state):
@@ -1334,7 +1371,10 @@ if selection_matches:
         )
         st.session_state[PROCESSING_STATE_KEY] = processing_state
         st.rerun()
-    scanned_files = processing_state["current_index"]
+    scanned_files = sum(
+        status not in {"pending", "processing"}
+        for status in processing_state["statuses"]
+    )
     progress_value = scanned_files / total_files if total_files else 0
 
     st.markdown('<div class="scan-panel">', unsafe_allow_html=True)
@@ -1357,13 +1397,24 @@ if selection_matches:
     if processing_state["status"] == "running":
         current_index = processing_state["current_index"]
         if current_index < total_files:
-            current_file = uploaded_files[current_index]
-            safe_current_filename = html.escape(str(current_file.name or "Invoice"))
+            active_indexes = [
+                index for index, status in enumerate(processing_state["statuses"])
+                if status == "pending"
+            ][:INVOICE_SCAN_WORKERS]
+            safe_current_filenames = "<br>".join(
+                html.escape(str(uploaded_files[index].name or "Invoice"))
+                for index in active_indexes
+            )
+            active_label = (
+                f"bills {active_indexes[0] + 1}–{active_indexes[-1] + 1}"
+                if len(active_indexes) > 1
+                else f"bill {active_indexes[0] + 1}"
+            )
             st.markdown(
                 f"""
                 <div class="current-file-card">
-                    <strong>Currently scanning bill {current_index + 1} of {total_files}</strong><br>
-                    {safe_current_filename}
+                    <strong>Currently scanning {active_label} of {total_files}</strong><br>
+                    {safe_current_filenames}
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1376,7 +1427,7 @@ if selection_matches:
                 st.session_state[PROCESSING_STATE_KEY] = processing_state
                 st.rerun()
 
-            processing_state = process_next_invoice(uploaded_files, processing_state)
+            processing_state = process_invoice_window(uploaded_files, processing_state)
             st.session_state[PROCESSING_STATE_KEY] = processing_state
             st.rerun()
 

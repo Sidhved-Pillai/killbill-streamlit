@@ -69,6 +69,25 @@ def test_each_invoice_is_sent_in_its_own_request(monkeypatch):
     assert [record["Invoice No."] for record in state["records"]] == progress.calls
 
 
+def test_two_invoice_window_keeps_requests_separate_and_persists_in_order(monkeypatch):
+    progress = ProcessingProgress(monkeypatch)
+    files = uploads()
+    state = app.create_processing_state(files)
+
+    app.process_invoice_window(files, state, worker_count=2)
+
+    assert set(progress.calls) == {"bill-1.jpg", "bill-2.jpg"}
+    assert state["statuses"] == ["processed", "processed", "pending"]
+    assert state["current_index"] == 2
+    assert [record["Invoice No."] for record in state["records"]] == [
+        "bill-1.jpg", "bill-2.jpg"
+    ]
+
+    app.process_invoice_window(files, state, worker_count=2)
+    assert state["status"] == "complete"
+    assert state["statuses"] == ["processed", "processed", "processed"]
+
+
 def test_failure_does_not_pause_later_bills_and_retry_only_retries_failure(monkeypatch):
     progress = ProcessingProgress(monkeypatch, fail_once="bill-2.jpg")
     files = uploads()

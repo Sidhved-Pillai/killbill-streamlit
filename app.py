@@ -70,14 +70,15 @@ except st.errors.StreamlitSecretNotFoundError:
 
 API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GENAI_API_KEY") or streamlit_api_key
 MODEL_FALLBACKS = [
-    "gemini-3.8-flash",
-    "gemini-3.5-flash",
-    "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.8-flash",
 ]
 MAX_RETRIES = 1
 INITIAL_BACKOFF_SECONDS = 4
 GEMINI_TOTAL_TIMEOUT_SECONDS = 60
+GEMINI_MAX_OUTPUT_TOKENS = 2048
 DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "billing_history.db")
 PROCESSING_STATE_KEY = "invoice_processing_batch"
 INVOICE_SCAN_WORKERS = 2
@@ -708,6 +709,35 @@ def is_retryable_error(error):
     return any(token in error_text for token in retry_tokens)
 
 
+def gemini_thinking_config(model_name):
+    """Use the cheapest supported thinking mode for invoice transcription."""
+    model_fields = getattr(types.ThinkingConfig, "model_fields", {})
+    if "thinking_level" in model_fields:
+        return types.ThinkingConfig(thinking_level="MINIMAL")
+    if "flash-lite" in model_name and "thinking_budget" in model_fields:
+        return types.ThinkingConfig(thinking_budget=0)
+    return None
+
+
+def gemini_generation_config(model_name, remaining_seconds):
+    """Bound visual and output tokens without reducing the source image quality."""
+    config_values = {
+        "system_instruction": SYSTEM_INSTRUCTION,
+        "response_mime_type": "application/json",
+        "temperature": 0,
+        "max_output_tokens": GEMINI_MAX_OUTPUT_TOKENS,
+        "media_resolution": types.MediaResolution.MEDIA_RESOLUTION_MEDIUM,
+        "http_options": types.HttpOptions(
+            timeout=max(1, int(remaining_seconds * 1000)),
+            retry_options=types.HttpRetryOptions(attempts=1),
+        ),
+    }
+    thinking_config = gemini_thinking_config(model_name)
+    if thinking_config is not None:
+        config_values["thinking_config"] = thinking_config
+    return types.GenerateContentConfig(**config_values)
+
+
 def analyze_bills(uploaded_files):
     if not API_KEY:
         raise ValueError(
@@ -731,14 +761,7 @@ def analyze_bills(uploaded_files):
                 response = client.models.generate_content(
                     model=model_name,
                     contents=content_parts,
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_INSTRUCTION,
-                        response_mime_type="application/json",
-                        http_options=types.HttpOptions(
-                            timeout=max(1, int(remaining_seconds * 1000)),
-                            retry_options=types.HttpRetryOptions(attempts=1),
-                        ),
-                    ),
+                    config=gemini_generation_config(model_name, remaining_seconds),
                 )
                 if time.monotonic() >= gemini_deadline:
                     last_error = TimeoutError(

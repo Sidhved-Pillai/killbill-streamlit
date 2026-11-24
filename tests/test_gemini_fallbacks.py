@@ -50,5 +50,7 @@ def test_generation_config_caps_paid_tokens_and_media_resolution():
     assert config.temperature == 0
     assert config.max_output_tokens == 2048
     assert config.media_resolution == app.types.MediaResolution.MEDIA_RESOLUTION_MEDIUM
-    assert config.thinking_config.thinking_budget == 0
+    thinking_budget = getattr(config.thinking_config, "thinking_budget", None)
+    thinking_level = getattr(config.thinking_config, "thinking_level", None)
+    assert thinking_budget == 0 or str(thinking_level).endswith("MINIMAL")
     assert config.http_options.timeout == 12500

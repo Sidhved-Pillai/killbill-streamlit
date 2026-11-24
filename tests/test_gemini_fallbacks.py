@@ -5,10 +5,10 @@ import app
 
 def test_model_fallbacks_do_not_include_unavailable_model():
     assert app.MODEL_FALLBACKS == [
-        "gemini-3.8-flash",
-        "gemini-3.5-flash",
-        "gemini-3.5-flash-lite",
         "gemini-3.1-flash-lite",
+        "gemini-3.5-flash-lite",
+        "gemini-3.5-flash",
+        "gemini-3.8-flash",
     ]
     assert "gemini-2.5-flash-lite" not in app.MODEL_FALLBACKS
 
@@ -42,3 +42,15 @@ def test_analyze_bills_uses_next_model_after_not_found(monkeypatch):
 
     assert result == [{"ok": True}]
     assert requested_models == app.MODEL_FALLBACKS[:2]
+
+
+def test_generation_config_caps_paid_tokens_and_media_resolution():
+    config = app.gemini_generation_config("gemini-3.1-flash-lite", 12.5)
+
+    assert config.temperature == 0
+    assert config.max_output_tokens == 2048
+    assert config.media_resolution == app.types.MediaResolution.MEDIA_RESOLUTION_MEDIUM
+    thinking_budget = getattr(config.thinking_config, "thinking_budget", None)
+    thinking_level = getattr(config.thinking_config, "thinking_level", None)
+    assert thinking_budget == 0 or str(thinking_level).endswith("MINIMAL")
+    assert config.http_options.timeout == 12500

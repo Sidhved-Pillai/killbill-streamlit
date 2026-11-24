@@ -24,6 +24,10 @@ def test_valid_gemini_result_is_returned(monkeypatch):
     class SuccessfulModels:
         def generate_content(self, **kwargs):
             assert kwargs["config"].response_mime_type == "application/json"
+            assert kwargs["config"].max_output_tokens == 2048
+            assert kwargs["config"].media_resolution == (
+                app.types.MediaResolution.MEDIA_RESOLUTION_MEDIUM
+            )
             return SimpleNamespace(
                 text='[{"Invoice No.": "INV-GEMINI"}]',
                 model_version="gemini-test",
